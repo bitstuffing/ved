@@ -283,3 +283,76 @@ gui_start_nested() {
     VED_NESTED_DISPLAY=""
     return 1
 }
+
+# GNOME >= 49 no longer supports X11 sessions (not even under Xephyr).
+# Launch gnome-shell --devkit: a nested Wayland window on the host display.
+VED_GUEST_GNOME_MAJOR=""
+VED_GUEST_DEVKIT_OK=0
+
+detect_gnome_major() {
+    local root="${1:-$VED_CHROOT_DIR}"
+    local out major
+
+    [[ -x "$root/usr/bin/gnome-shell" ]] || return 1
+    out="$(timeout 10 chroot "$root" /usr/bin/gnome-shell --version 2>/dev/null)" ||
+        return 1
+    major="$(grep -oE '[0-9]+' <<<"$out" | head -n1)"
+    [[ -n "$major" ]] || return 1
+    printf '%s' "$major"
+}
+
+guest_has_devkit() {
+    local root="$1" path
+    for path in /usr/libexec/mutter-devkit /usr/lib/mutter-devkit \
+        /usr/lib64/mutter-devkit; do
+        [[ -x "$root$path" ]] && return 0
+    done
+    return 1
+}
+
+# Call with the root already mounted and the session already selected (before select_gui_target).
+session_probe_guest() {
+    local root="$1"
+
+    VED_GUEST_GNOME_MAJOR=""
+    VED_GUEST_DEVKIT_OK=0
+    [[ "$VED_SESSION" == "desktop" ]] || return 0
+    [[ -z "$VED_COMMAND" ]] || return 0       # the user chose their own command
+
+    VED_GUEST_GNOME_MAJOR="$(detect_gnome_major "$root" || true)"
+    [[ "${VED_GUEST_GNOME_MAJOR:-0}" -ge 49 ]] || {
+        VED_GUEST_GNOME_MAJOR=""
+        return 0
+    }
+
+    if [[ "$VED_GUI_TARGET" == "nested" ]]; then
+        warn "$(t gnome_no_x11_nested "$VED_GUEST_GNOME_MAJOR")"
+    else
+        info "$(t gnome_using_devkit "$VED_GUEST_GNOME_MAJOR")"
+    fi
+    VED_GUI_TARGET="host"        # avoids Xephyr and the assistant's question
+
+    if guest_has_devkit "$root"; then
+        VED_GUEST_DEVKIT_OK=1
+    else
+        warn "$(t gnome_devkit_missing)"
+    fi
+}
+
+# Replaces session_build_command in the backends. Emits no warnings; outputs only the command.
+session_build_command_ex() {
+    local root="$1"
+    local cmd='gnome-shell --devkit --wayland --wayland-display ved-$$'
+
+    if [[ -n "${VED_GUEST_GNOME_MAJOR:-}" ]]; then
+        [[ "$VED_GUEST_DEVKIT_OK" -eq 1 ]] || return 1
+        if [[ -x "$root/usr/bin/dbus-run-session" ||
+            -x "$root/bin/dbus-run-session" ]]; then
+            cmd="dbus-run-session -- $cmd"
+        fi
+        printf '%s' "$cmd"      # $$ is expanded by the guest's sh, not by ved.
+        return 0
+    fi
+
+    session_build_command "$root"
+}

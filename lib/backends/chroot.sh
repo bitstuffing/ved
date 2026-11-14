@@ -263,8 +263,17 @@ backend_chroot() {
         VED_GRAPHICAL=1
     fi
 
+    # fix: mount before the graphical questions to be able to inspect the guest
+    info "$(t chroot_mounting)"
+    mkdir -p "$root"
+    cleanup_add_dir "$root"
+    umount_path "$root"
+    mount_path "$VED_ROOT_PARTITION" "$root" "rw"
+    info "$(t chroot_ready "$root")"
+
     if [[ "$VED_GRAPHICAL" -eq 1 ]]; then
         detect_graphical_user
+        session_probe_guest "$root"
         if session_is_graphical; then
             if [[ "$VED_SESSION" == "app" && -z "$VED_COMMAND" && -t 0 ]]; then
                 VED_COMMAND="$(ask "$(t app_command_prompt)" "")"
@@ -277,13 +286,6 @@ backend_chroot() {
     fi
 
     show_configuration
-
-    info "$(t chroot_mounting)"
-    mkdir -p "$root"
-    cleanup_add_dir "$root"
-    umount_path "$root"
-    mount_path "$VED_ROOT_PARTITION" "$root" "rw"
-    info "$(t chroot_ready "$root")"
 
     user="$(chroot_detect_user "$root")"
     if [[ -z "$user" ]]; then
@@ -299,7 +301,7 @@ backend_chroot() {
     chroot_prepare_mounts "$root"
 
     if session_is_graphical; then
-        command="$(session_build_command "$root" || true)"
+        command="$(session_build_command_ex "$root" || true)"
         if [[ -z "$command" ]]; then
             if [[ "$VED_SESSION" == "desktop" ]]; then
                 warn "$(t desktop_session_missing)"

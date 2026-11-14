@@ -36,13 +36,17 @@ nspawn_build_args() {
             NSPAWN_ARGS+=(--bind="$VED_HOST_RUNTIME_DIR:$runtime")
         fi
         if [[ -d /tmp/.X11-unix ]]; then
-            NSPAWN_ARGS+=(--bind-ro=/tmp/.X11-unix)
+            NSPAWN_ARGS+=(--bind=/tmp/.X11-unix)
         fi
         if [[ -d /dev/dri ]]; then
-            NSPAWN_ARGS+=(--bind-ro=/dev/dri)
+            NSPAWN_ARGS+=(--bind=/dev/dri "--property=DeviceAllow=char-drm rw")
         fi
         if [[ -d /dev/snd ]]; then
             NSPAWN_ARGS+=(--bind=/dev/snd)
+        fi
+        #if [[ -d /run/dbus ]]; then
+        if [[ "$VED_BOOT" -ne 1 && -d /run/dbus ]]; then
+            NSPAWN_ARGS+=(--bind=/run/dbus)
         fi
 
         local xauthority="${XAUTHORITY:-$VED_GUI_HOME/.Xauthority}"
@@ -239,9 +243,18 @@ backend_nspawn() {
         VED_GRAPHICAL=1
     fi
 
+    # fix: mount before the graphical questions to be able to inspect the guest
+    info "$(t chroot_mounting)"
+    mkdir -p "$root"
+    cleanup_add_dir "$root"
+    umount_path "$root"
+    mount_path "$VED_ROOT_PARTITION" "$root" "rw"
+    info "$(t chroot_ready "$root")"
+
     if [[ "$VED_GRAPHICAL" -eq 1 ]]; then
         detect_graphical_user
         info "$(t nspawn_graphical)"
+        session_probe_guest "$root"
         if session_is_graphical; then
             if [[ "$VED_SESSION" == "app" && -z "$VED_COMMAND" && -t 0 ]]; then
                 VED_COMMAND="$(ask "$(t app_command_prompt)" "")"
@@ -254,13 +267,6 @@ backend_nspawn() {
     fi
 
     show_configuration
-
-    info "$(t chroot_mounting)"
-    mkdir -p "$root"
-    cleanup_add_dir "$root"
-    umount_path "$root"
-    mount_path "$VED_ROOT_PARTITION" "$root" "rw"
-    info "$(t chroot_ready "$root")"
 
     if [[ ! -d "$root/etc/systemd/system" && ! -x "$root/usr/lib/systemd/systemd" && ! -x "$root/lib/systemd/systemd" ]]; then
         warn "$(t nspawn_requires_systemd)"
@@ -277,7 +283,7 @@ backend_nspawn() {
     fi
 
     if session_is_graphical; then
-        command="$(session_build_command "$root" || true)"
+        command="$(session_build_command_ex "$root" || true)"
         if [[ -z "$command" ]]; then
             if [[ "$VED_SESSION" == "desktop" ]]; then
                 warn "$(t desktop_session_missing)"

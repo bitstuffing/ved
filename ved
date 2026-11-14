@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3))); then
+    printf 'ERROR: Bash 4.3 or newer is required (found %s).\n' "$BASH_VERSION" >&2
+    exit 1
+fi
+
+VED_MAIN="$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+VED_ROOT="$(cd -- "$(dirname -- "$VED_MAIN")" && pwd -P)"
+export VED_MAIN VED_ROOT
+
+# shellcheck source=lib/core.sh
+source "$VED_ROOT/lib/core.sh"
+# shellcheck source=lib/i18n.sh
+source "$VED_ROOT/lib/i18n.sh"
+# shellcheck source=lib/platform.sh
+source "$VED_ROOT/lib/platform.sh"
+# shellcheck source=lib/ui.sh
+source "$VED_ROOT/lib/ui.sh"
+# shellcheck source=lib/session.sh
+source "$VED_ROOT/lib/session.sh"
+# shellcheck source=lib/disks.sh
+source "$VED_ROOT/lib/disks.sh"
+# shellcheck source=lib/firmware.sh
+source "$VED_ROOT/lib/firmware.sh"
+# shellcheck source=lib/display.sh
+source "$VED_ROOT/lib/display.sh"
+# shellcheck source=lib/backends/qemu.sh
+source "$VED_ROOT/lib/backends/qemu.sh"
+# shellcheck source=lib/backends/chroot.sh
+source "$VED_ROOT/lib/backends/chroot.sh"
+# shellcheck source=lib/backends/nspawn.sh
+source "$VED_ROOT/lib/backends/nspawn.sh"
+
+ved_main "$@"

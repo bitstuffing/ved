@@ -1,0 +1,50 @@
+# Operating system cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors and IDEs
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.sublime-*
+
+# Shell / tooling
+.shellcheckrc
+.editorconfig
+
+# Logs
+*.log
+
+# Local test artifacts and scratch files
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# Disk images and virtual disks
+*.img
+*.raw
+*.qcow2
+*.qcow
+*.vmdk
+*.vdi
+*.vhd
+
+# Runtime / generated data
+/run/
+/var/
+/tmp/
+/out/
+/build/
+dist/
+
+# Local environment overrides
+.env
+.env.*
+*.local
+
+# Dependency / cache directories
+.cache/

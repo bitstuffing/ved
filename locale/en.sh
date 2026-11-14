@@ -1,0 +1,294 @@
+VED_MESSAGES+=(
+    [warn_prefix]="WARNING:"
+    [error_prefix]="ERROR:"
+    [unknown_option]="Unknown option: %s"
+    [unexpected_argument]="Unexpected argument: %s"
+    [config_missing]="Configuration file not found: %s"
+    [root_required]="This script must be run with administrator privileges."
+    [rerun_sudo]="Rerunning the script with sudo..."
+    [sudo_password_prompt]="Administrator password: "
+    [sudo_password_incorrect]="Incorrect password, try again."
+    [sudo_failed]="Could not obtain administrator privileges."
+    [gui_user_error]="The graphical session user could not be identified."
+    [execute_from_session]="Run the script from a normal graphical desktop session."
+    [runtime_missing]="The graphical session runtime directory does not exist: %s"
+    [runtime_prepare_failed]="Could not create the graphical runtime directory: %s"
+    [guest_uid_mismatch]="The guest user UID (%s) differs from the host UID (%s); using the host display may fail. Try --gui nested."
+    [missing_command]="Required command not found: %s"
+    [missing_file]="Required file not found: %s"
+    [cleanup]="Cleaning temporary files..."
+    [cleanup_done]="Cleanup completed."
+    [keeping_temp]="Temporary files were kept in: %s"
+    [backend_invalid]="Invalid backend: %s"
+    [guest_os_invalid]="Invalid guest operating system: %s"
+    [storage_invalid]="Invalid storage mode: %s"
+    [display_invalid]="Invalid display mode: %s"
+    [accel_invalid]="Invalid acceleration mode: %s"
+    [tpm_invalid]="Invalid TPM mode: %s"
+    [unknown_language]="Unsupported language: %s"
+    [usage]="ved - Virtual External Devices
+
+Usage:
+  ved [options]
+
+Run without options for an interactive menu.
+
+Backends:
+  qemu                  Run a physical disk, partition or disk image in QEMU/KVM
+  chroot                Mount an installed Linux system and enter it with chroot
+  nspawn                Mount an installed Linux system and run it with systemd-nspawn
+
+Common options:
+  -b, --backend NAME    qemu, chroot or nspawn (default: qemu)
+  -L, --lang CODE       Language code: en, es (default: from the environment)
+  -d, --disk DEVICE     Physical disk, for example /dev/nvme0n1
+  -i, --image FILE      Disk image file (QEMU backend)
+  -p, --partition DEV   Linux root partition (chroot/nspawn backend)
+      --esp DEVICE      EFI system partition (auto-detected by default)
+      --os TYPE         auto, linux or windows (default: auto)
+      --efi-loader PATH EFI loader relative to the ESP, or empty for the UEFI menu
+      --storage MODE    temp or persistent (default: ask)
+      --ram SIZE        Memory size, for example 8G or 8192M
+      --cpus N          Number of virtual CPUs
+      --accel MODE      auto, kvm or tcg (default: auto)
+      --tpm             Enable TPM passthrough or a software TPM
+      --no-tpm          Disable the TPM
+      --secure-boot     Use the Secure Boot OVMF firmware
+      --boot-menu       Show the QEMU boot menu (default)
+      --no-boot-menu    Hide the QEMU boot menu
+      --network MODE    user or none (default: user)
+      --usb VID:PID     Pass a USB device to the VM; can be repeated
+      --usb-auto MODE   auto: pass webcam and Bluetooth, offer phones; all:
+                        also pass phones; none: disable (default: auto)
+      --no-usb          Do not auto-detect USB devices
+      --reset-bluetooth VID:PID
+                        Reset a USB device shortly after the VM starts
+      --display MODE    auto, spice-gl, spice, gtk-gl, gtk, sdl, vnc or none
+      --gl              Force OpenGL acceleration
+      --no-gl           Disable OpenGL acceleration
+      --render-node DEV Force a DRM render node, for example /dev/dri/renderD128
+      --user NAME       User to use inside a chroot or nspawn container
+  -c, --command CMD     Command to run in the chroot or nspawn backend
+      --graphical       Bind the host display and audio into chroot/nspawn
+      --boot            Boot the guest with systemd-nspawn instead of a command
+      --session MODE    chroot/nspawn: shell, app, desktop or system (default: ask)
+      --app CMD         Run a single graphical application (implies --session app)
+      --gui TARGET      Draw the graphical session on the host or in a nested
+                        Xephyr window: host or nested (default: ask)
+      --nested          Shortcut for --gui nested
+      --arch ARCH       QEMU guest architecture: auto, x86_64 or aarch64
+
+Other options:
+      --config FILE     Load a configuration file before applying options
+      --no-install      Do not install missing packages
+  -y, --yes             Answer yes to confirmation prompts
+  -n, --dry-run         Print the QEMU command instead of running it
+      --keep-temp       Keep temporary files after exit
+  -v, --verbose         Show debugging output
+  -h, --help            Show this help
+  -V, --version         Show the version"
+    [select_backend]="Choose a backend:"
+    [select_action]="What do you want to do?"
+    [select_backend_prompt]="Option [1]: "
+    [backend_qemu]="Start it as a virtual machine (QEMU/KVM)"
+    [backend_chroot]="Enter an installed Linux system (chroot)"
+    [backend_nspawn]="Run an installed Linux system as a container (systemd-nspawn)"
+    [select_session]="What do you want to launch inside the system?"
+    [session_shell]="An interactive shell"
+    [session_app]="A single graphical application"
+    [session_desktop]="A full desktop session"
+    [session_system]="Boot the whole system (init/systemd)"
+    [select_session_prompt]="Option [1]: "
+    [select_gui_target]="Where should the graphical session be shown?"
+    [gui_target_host]="On the current desktop (host display)"
+    [gui_target_nested]="In a separate nested window (Xephyr)"
+    [select_gui_target_prompt]="Option [1]: "
+    [select_arch]="Guest architecture:"
+    [arch_x86_64]="x86_64 / amd64 (PC)"
+    [arch_aarch64]="aarch64 / arm64 (ARM, Raspberry Pi)"
+    [arch_auto]="Detect automatically"
+    [select_arch_prompt]="Option [1]: "
+    [app_command_prompt]="Application to run, for example firefox: "
+    [app_command_missing]="No application was specified for --session app."
+    [desktop_session_missing]="No desktop session was found inside the system."
+    [system_needs_nspawn]="Booting a full system needs systemd-nspawn, which is not installed."
+    [system_using_nspawn]="Booting the full system through systemd-nspawn..."
+    [nested_unavailable]="Xephyr is not available; using the host display instead."
+    [nested_no_host_display]="No host display was found for the nested window; using the host display."
+    [nested_started]="Nested display started on %s."
+    [nested_software_gl]="Xephyr has no DRI3; the nested session will use software rendering."
+    [nested_failed]="The nested display could not be started; using the host display."
+    [platform_unknown]="Unsupported distribution: %s"
+    [pkg_manager_unknown]="No supported package manager was found."
+    [installing_dependencies]="Installing packages: %s"
+    [dependencies_ready]="Dependencies are ready."
+    [install_failed]="Package installation failed: %s"
+    [missing_packages]="Missing packages and --no-install was requested: %s"
+    [kvm_missing]="Hardware virtualization is not available; using TCG (slow)."
+    [kvm_enabled]="KVM acceleration is enabled."
+    [no_disks]="No physical disks were found."
+    [available_disks]="Available disks:"
+    [select_disk]="Which disk do you want to use? [1]: "
+    [invalid_selection]="Invalid selection."
+    [selected_disk]="Selected disk:"
+    [disk_missing]="The selected disk does not exist: %s"
+    [no_partitions]="No usable Linux partitions were found on: %s"
+    [available_partitions]="Available Linux root partitions:"
+    [select_partition]="Which root partition do you want to use? [1]: "
+    [selected_partition]="Selected partition:"
+    [partition_missing]="The selected partition does not exist: %s"
+    [mounted_disk]="One or more partitions on this disk are mounted:"
+    [no_efi]="No EFI system partition was found on: %s"
+    [detected_efi]="Detected EFI system partition:"
+    [efi_missing]="The selected EFI partition does not exist: %s"
+    [mounting_source]="Mounting the original EFI partition read-only..."
+    [luks_partition]="Partition %s is a LUKS encrypted partition. Please unlock it first (cryptsetup luksOpen) and use the mapped device."
+    [lvm_partition]="Partition %s is an LVM physical volume. Please activate the volume group (vgchange -ay) and use the logical volume device."
+    [efi_loaders]="Detected EFI loaders:"
+    [no_loaders]="No EFI loaders were found in: %s"
+    [uefi_menu]="Show the QEMU UEFI menu"
+    [select_loader]="Which loader do you want to use? [1]: "
+    [selected_loader]="Selected EFI loader:"
+    [loader_missing]="The selected loader does not exist: %s"
+    [system_memory]="System memory:"
+    [total_memory]="Total memory: %s MiB"
+    [available_memory]="Available memory: approximately %s MiB"
+    [recommended_memory]="Recommended VM memory: %sG"
+    [select_memory]="How much memory do you want to assign? [%sG]: "
+    [invalid_memory]="Invalid format. Use, for example: 8G, 16G or 8192M."
+    [processors]="Processors:"
+    [total_processors]="Total: %s"
+    [available_processors]="Currently available: %s"
+    [recommended_processors]="Recommended VM CPUs: %s"
+    [select_cpus]="How many CPUs do you want to assign? [%s]: "
+    [invalid_cpus]="Invalid number. Enter a value between 1 and %s."
+    [configuration]="Selected configuration:"
+    [backend_label]="Backend: %s"
+    [disk_label]="Disk: %s"
+    [image_label]="Image: %s"
+    [partition_label]="Partition: %s"
+    [efi_label]="EFI: %s"
+    [ram_label]="RAM: %s"
+    [cpu_label]="CPUs: %s"
+    [storage_label]="Storage: %s"
+    [display_label]="Display: %s"
+    [accel_label]="Acceleration: %s"
+    [gl_label]="OpenGL: %s"
+    [render_label]="Render node: %s"
+    [network_label]="Network: %s"
+    [guest_label]="Guest: %s"
+    [secure_boot_label]="Secure Boot: %s"
+    [graphical_label]="Graphical session: %s"
+    [session_label]="Launch: %s"
+    [gui_label]="Display: %s"
+    [arch_label]="Architecture: %s"
+    [value_enabled]="enabled"
+    [value_disabled]="disabled"
+    [value_kvm]="KVM (hardware)"
+    [value_tcg]="TCG (software, slow)"
+    [yes_value]="yes"
+    [tmp_label]="Temporary files: %s"
+    [image_missing]="The disk image does not exist: %s"
+    [image_format_unknown]="Unknown image format for: %s"
+    [image_and_disk]="Use either --image or --disk, not both."
+    [network_invalid]="Invalid network mode: %s"
+    [storage_mode]="Storage mode:"
+    [temporary_storage]="Temporary: discard changes when exiting"
+    [persistent_storage]="Persistent: save changes to the disk"
+    [select_storage]="Option [1]: "
+    [temporary_selected]="Temporary mode selected."
+    [persistent_selected]="Persistent mode selected."
+    [persistent_warning]="WARNING: changes will be written directly to the physical disk."
+    [confirm_persistent]="Continue? [y/N]: "
+    [confirm_yes]="Continue? [Y/n]: "
+    [invalid_option]="Invalid option."
+    [session_invalid]="Invalid session mode: %s"
+    [gui_target_invalid]="Invalid display target: %s"
+    [arch_invalid]="Invalid architecture: %s"
+    [aborted]="Aborted."
+    [creating_esp]="Creating temporary virtual EFI partition..."
+    [copying_efi]="Copying EFI files..."
+    [creating_vars]="Creating temporary UEFI NVRAM..."
+    [creating_tpm]="Starting software TPM..."
+    [tpm_passthrough]="Using hardware TPM passthrough."
+    [tpm_swtpm]="Using a software TPM emulator."
+    [tpm_disabled]="TPM disabled."
+    [tpm_missing]="No hardware TPM or swtpm was found; TPM disabled."
+    [tpm_in_use]="The software TPM is already in use by another VM."
+    [secure_boot_enabled]="Secure Boot firmware selected."
+    [arch_detected]="Detected guest architecture: %s"
+    [cross_arch_tcg]="Emulating %s with TCG (slow)."
+    [aarch64_qemu_missing]="qemu-system-aarch64 was not found; install it to run ARM images."
+    [aavmf_missing]="ARM UEFI firmware (AAVMF/edk2-aarch64) was not found; install it to boot ARM images."
+    [no_render_node]="No DRM render node was found; OpenGL disabled."
+    [render_node]="OpenGL render node: %s"
+    [gl_disabled]="OpenGL acceleration disabled."
+    [starting_qemu]="Starting QEMU..."
+    [qemu_command]="QEMU command:"
+    [waiting_spice]="Waiting for the SPICE server..."
+    [spice_ready]="QEMU is listening on the SPICE socket."
+    [spice_error]="The SPICE socket could not be created: %s"
+    [qemu_failed]="QEMU could not be started."
+    [qemu_log]="QEMU log: %s"
+    [qemu_stopped]="QEMU stopped."
+    [qemu_running]="QEMU is running. Close the window or press Ctrl+C to stop it."
+    [headless_running]="QEMU is running headless. Press Ctrl+C to stop it."
+    [no_display]="No usable display mode was found. Try --display none or install a viewer."
+    [trying_display]="Trying display mode: %s"
+    [display_fallback]="Display mode failed; trying the next option."
+    [display_active]="Active display mode: %s"
+    [gl_active]="OpenGL acceleration active on: %s"
+    [connecting_viewer]="Connecting with the graphical viewer..."
+    [graphical_user]="Graphical user: %s"
+    [resize_hint]="You can resize the window."
+    [no_viewer]="No SPICE viewer was found. Connect manually to: %s"
+    [viewer_failed]="The viewer exited; the VM is still running. Press Ctrl+C to stop it."
+    [vnc_listening]="VNC is listening on 127.0.0.1:5900."
+    [guest_os_linux]="Linux guest detected."
+    [guest_os_windows]="Windows guest detected."
+    [guest_os_unknown]="Could not detect the guest operating system; assuming Linux."
+    [guest_os_forced]="Guest operating system forced to: %s"
+    [usb_passthrough]="Passing USB device to the VM: %s"
+    [usb_not_found]="USB device not found; skipping: %s"
+    [usb_invalid]="Invalid USB identifier (expected VID:PID): %s"
+    [usb_auto_webcam]="Auto-detected webcam: %s"
+    [usb_auto_bluetooth]="Auto-detected Bluetooth adapter: %s"
+    [usb_auto_android]="Passing Android device: %s"
+    [usb_offer_android]="Pass Android device \"%s\" to the VM? [Y/n]: "
+    [usb_skipped]="USB device skipped: %s"
+    [usb_auto_disabled]="USB auto-detection disabled."
+    [usb_auto_invalid]="Invalid USB auto mode: %s"
+    [usb_label]="USB: %s"
+    [bluetooth_reset]="Resetting USB device: %s"
+    [bluetooth_not_found]="USB device to reset was not found: %s"
+    [bluetooth_reset_done]="USB device reset completed: %s"
+    [audio_enabled]="Audio enabled with driver: %s"
+    [audio_disabled]="Audio disabled."
+    [chroot_mounting]="Mounting the Linux root partition..."
+    [chroot_ready]="Linux root is ready at: %s"
+    [chroot_entering]="Entering chroot as user: %s"
+    [chroot_command]="Running command in chroot: %s"
+    [chroot_shell]="Opening an interactive shell in the chroot."
+    [chroot_graphical]="Binding the host display and audio into a private runtime directory."
+    [chroot_no_user]="No usable user was found inside the chroot; using root."
+    [chroot_unmount]="Unmounting the chroot filesystems..."
+    [chroot_bind_failed]="Could not bind-mount: %s"
+    [nspawn_missing]="systemd-nspawn is not installed; install systemd-container or systemd."
+    [nspawn_starting]="Starting systemd-nspawn..."
+    [nspawn_boot]="Booting the container with systemd-nspawn..."
+    [nspawn_shell]="Opening an interactive shell in the container."
+    [nspawn_command]="Running command in the container: %s"
+    [nspawn_graphical]="Binding the host display, audio and GPU into a private runtime directory."
+    [nspawn_requires_systemd]="The selected root filesystem does not look like a systemd installation."
+    [confirm_run]="Start now? [Y/n]: "
+    [no_tty]="This operation needs an interactive terminal, or provide the missing options explicitly."
+    [dry_run]="Dry run: the following command would be executed:"
+    [auto_value]="auto"
+    [press_enter]="Press Enter to continue..."
+    [nspawn_stopping]="Stopping container: %s"
+    [nspawn_rebooting]="Rebooting container: %s"
+    [nspawn_powering_off]="Powering off container: %s"
+    [nspawn_status_hint]=" Ctrl+A then: [S]top  [R]eboot  [P]oweroff  [Q]uit ved "
+    [nspawn_status_hint_cmd]=" Command mode: [S]top  [R]eboot  [P]oweroff  [Q]uit  [Esc] cancel "
+    [nspawn_status_machine]=" Machine: %s  PID: %s "
+)

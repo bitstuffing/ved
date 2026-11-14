@@ -208,17 +208,29 @@ What gets bound automatically:
 | GPU/DRM (`/dev/dri`) | ✓ | ✓ |
 | Audio (`/dev/snd`, PipeWire/Pulse) | ✓ | ✓ |
 | Input devices (`/dev/input`) | ✓ | ✓ |
-| D-Bus session/user bus | ✓ | ✓ |
-| User runtime dir (`/run/user/$UID`) | ✓ | ✓ |
+| D-Bus session bus | ✓ | ✓ |
+| Private user runtime dir (`/run/user/$UID`) | ✓ | ✓ |
 | Xauthority | ✓ | ✓ |
 
-The session is wrapped with `systemd-run --user` (preferred) or `dbus-run-session`
-so GNOME/KDE can start their required services (gvfs, polkit, keyring, etc.).
+The guest gets its **own private `XDG_RUNTIME_DIR`**, owned by the graphical user.
+Only the host sockets it actually needs are exported into it (the Wayland
+compositor socket for the `host` target, plus the PulseAudio/PipeWire audio
+sockets). The host's `/run/user/$UID` is never bind-mounted as a whole: sharing it
+would make the guest's systemd, keyring, gvfs, Remmina and D-Bus daemons collide
+with the host's live sockets.
+
+The session is wrapped with `dbus-run-session` so GNOME/KDE can start their
+required services (gvfs, keyring, etc.). `systemd-run --user` is used only when a
+systemd *user* manager is actually running inside the container; a container
+started without `--boot` has no PID 1 and therefore no user manager, so the host's
+systemd socket must not be used.
 
 **GUI target** (`--gui` / `--gui-target`):
 
 - `host` (default): render on your current Wayland/X11 session
-- `nested`: start a nested Xephyr X server (isolated window)
+- `nested`: start a nested Xephyr X server (isolated window). Xephyr has no DRI3,
+  so the session is forced to software rendering (`LIBGL_ALWAYS_SOFTWARE=1`);
+  GPU acceleration is only available with the `host` target.
 
 ## nspawn status bar (Ctrl+A prefix)
 
@@ -358,6 +370,17 @@ qemu-ubuntu.sh          original reference script (kept for history)
 - **GNOME/KDE falls back to "Something has gone wrong" screen** — ensure your user
   exists in the guest (UID 1000), try `--gui nested` (Xephyr) to isolate Wayland
   issues, or check `journalctl --user -f` inside the session for gnome-shell errors.
+- **`Failed to connect to user scope bus via local transport: No data available`** —
+  `systemd-run --user` was used in a container that was not booted with `--boot`.
+  There is no systemd user manager inside it; `ved` now falls back to
+  `dbus-run-session`.
+- **`DRI3 error` / `GL Helper exited with code 512` in Xephyr** — expected with a
+  nested server. `ved` forces `LIBGL_ALWAYS_SOFTWARE=1` for the `nested` target.
+  Use `--gui host` if you need GPU acceleration.
+- **`couldn't connect to control socket ... /keyring/control` or
+  `fuse: failed to access mountpoint .../gvfs`** — the guest was reusing the
+  host's `/run/user/$UID`. `ved` now creates a private runtime directory for the
+  guest instead.
 - **nspawn status bar not appearing** — requires a real TTY (`-t`); it won't show
   in scripts or pipes. Use `--dry-run` to verify the command.
 

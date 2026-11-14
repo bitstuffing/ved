@@ -25,6 +25,8 @@ the administrator password only once.
 - [Display and OpenGL](#display-and-opengl)
 - [TPM and Secure Boot](#tpm-and-secure-boot)
 - [Languages](#languages)
+- [Graphical desktop sessions (chroot / nspawn)](#graphical-desktop-sessions-chroot--nspawn)
+- [nspawn status bar](#nspawn-status-bar-ctrla-prefix)
 - [Options](#options)
 - [Examples](#examples)
 - [Project layout](#project-layout)
@@ -51,10 +53,13 @@ the administrator password only once.
 - **Storage modes**: temporary (discard changes on exit) or persistent.
 - **Automatic dependency installation** for your distribution, or `--no-install`.
 - **Internationalization** with English and Spanish out of the box.
-- **Dry run** (`--dry-run`) to print the exact QEMU command without running it.
+- **Dry run** (`--dry-run`) to print the exact command without running it.
 - **Administrator password asked once**, then re-executes through `sudo` cleanly.
-- **Graphical desktop sessions** in chroot/nspawn: launch a full GNOME/KDE/Plasma/Xfce
-  session with GPU acceleration, Wayland/X11, audio, and input devices.
+- **Graphical desktop sessions** in chroot/nspawn: launch a full desktop session
+  (GNOME, KDE Plasma, Xfce, …) or a single app from an installed system, with GPU
+  acceleration, Wayland/X11, audio and input devices.
+- **GNOME 49+ aware**: ved inspects the installed system and, when GNOME no longer
+  supports X11, starts the shell as a nested Wayland window instead of Xephyr.
 - **nspawn status bar** (Ctrl+A prefix): when booting a full system with `--boot`,
   a persistent status bar shows machine name/PID and lets you Stop/Reboot/Poweroff/Quit
   without leaving the terminal.
@@ -63,7 +68,8 @@ the administrator password only once.
 
 - Linux with **Bash 4.3+**.
 - **KVM** (`/dev/kvm`) for hardware acceleration — falls back to TCG (slow) if absent.
-- A graphical session if you want a windowed VM (SPICE/GTK viewer).
+- A graphical session if you want a windowed VM (SPICE/GTK viewer) or a graphical
+  chroot/nspawn session.
 
 `ved` checks for its dependencies and can install them automatically. The logical
 dependencies are:
@@ -77,6 +83,15 @@ dependencies are:
 | SPICE viewer (optional) | `virt-viewer` (`remote-viewer`, `virt-viewer`, `spicy`) |
 | Software TPM (optional) | `swtpm` |
 | Containers (nspawn backend) | `systemd-container` |
+| Nested X11 (optional) | `Xephyr` (only for guests that still support X11 sessions) |
+
+**Requirements inside the installed (guest) system** for a full graphical desktop:
+
+| Guest desktop | What it needs |
+| --- | --- |
+| GNOME 49+ (Ubuntu 25.10+, Fedora 43+, …) | `mutter-devkit` (Ubuntu: package `mutter-dev-bin`) |
+| GNOME ≤ 48, KDE Plasma, Xfce, MATE, Cinnamon, … | the usual session binary (`gnome-session`, `startplasma-x11`, `startxfce4`, …) |
+| Any | `dbus-run-session` (package `dbus-daemon` / `dbus-x11`) |
 
 ## Supported distributions
 
@@ -115,7 +130,8 @@ The tool will:
 1. scan and list your physical disks, and ask which one to use;
 2. ask what to do with it (virtual machine, chroot or container);
 3. ask for the administrator password (once);
-4. detect the EFI loader, guest OS, memory, CPUs and storage mode;
+4. mount the system, inspect it and detect the EFI loader, guest OS, desktop,
+   memory, CPUs and storage mode;
 5. show a summary of exactly what it is about to launch, and start it.
 
 ## Backends
@@ -138,7 +154,22 @@ What do you want to do?
   2) Enter an installed Linux system (chroot)
   3) Run an installed Linux system as a container (systemd-nspawn)
 Option [1]:
+
+What do you want to launch inside the system?
+  1) An interactive shell
+  2) A single graphical application
+  3) A full desktop session
+  4) Boot the whole system (init/systemd)
+Option [1]:
+
+Where should the graphical session be shown?
+  1) On the current desktop (host screen)
+  2) In a separate nested window (Xephyr)
+Option [1]:
 ```
+
+The last question is skipped automatically when the installed desktop cannot run
+inside Xephyr (see [GNOME 49+](#gnome-49-and-newer)).
 
 ## USB devices (webcam, Bluetooth/AirPods, phones)
 
@@ -189,13 +220,13 @@ is a matter of copying `locale/en.sh` and translating the values.
 ## Graphical desktop sessions (chroot / nspawn)
 
 With `--graphical` (or `--session desktop` in the menu) you can launch a **full
-desktop environment** (GNOME, KDE Plasma, Xfce, etc.) from an installed system:
+desktop environment** from an installed system:
 
 ```bash
 # chroot backend (lightweight, no PID 1 isolation)
 ./ved --backend chroot --partition /dev/nvme0n1p2 --graphical --session desktop
 
-# nspawn backend (better isolation, systemd user session)
+# nspawn backend (container; no systemd user session unless --boot is used)
 ./ved --backend nspawn --partition /dev/nvme0n1p2 --graphical --session desktop
 ```
 
@@ -203,12 +234,13 @@ What gets bound automatically:
 
 | Resource | chroot | nspawn |
 | --- | --- | --- |
-| X11 socket (`/tmp/.X11-unix`) | ✓ | ✓ |
-| Wayland socket (`$XDG_RUNTIME_DIR`) | ✓ | ✓ |
-| GPU/DRM (`/dev/dri`) | ✓ | ✓ |
+| X11 socket (`/tmp/.X11-unix`, read-write) | ✓ | ✓ |
+| Wayland socket (exported into the private runtime dir) | ✓ | ✓ |
+| GPU/DRM (`/dev/dri`, read-write) | ✓ | ✓ |
 | Audio (`/dev/snd`, PipeWire/Pulse) | ✓ | ✓ |
 | Input devices (`/dev/input`) | ✓ | ✓ |
-| D-Bus session bus | ✓ | ✓ |
+| System D-Bus (`/run/dbus`) | ✓ | ✓ (without `--boot`) |
+| Session D-Bus | ✓ (`dbus-run-session`) | ✓ (`dbus-run-session`) |
 | Private user runtime dir (`/run/user/$UID`) | ✓ | ✓ |
 | Xauthority | ✓ | ✓ |
 
@@ -225,12 +257,44 @@ systemd *user* manager is actually running inside the container; a container
 started without `--boot` has no PID 1 and therefore no user manager, so the host's
 systemd socket must not be used.
 
+The system root is mounted **before** the graphical questions are asked, so `ved`
+can inspect the installed desktop and offer only the options that will work.
+
 **GUI target** (`--gui` / `--gui-target`):
 
-- `host` (default): render on your current Wayland/X11 session
+- `host` (default): render on your current Wayland/X11 session. GPU acceleration is
+  available.
 - `nested`: start a nested Xephyr X server (isolated window). Xephyr has no DRI3,
   so the session is forced to software rendering (`LIBGL_ALWAYS_SOFTWARE=1`);
-  GPU acceleration is only available with the `host` target.
+  GPU acceleration is only available with the `host` target. Only valid for
+  desktops that still support X11 sessions.
+
+### GNOME 49 and newer
+
+GNOME Shell 49 (for example Ubuntu 25.10) no longer supports X11 sessions. Running
+`gnome-session` inside Xephyr starts the background services (Remmina, Evolution,
+gvfs, …) but never starts the shell, which shows up as a permanent black screen.
+Leftover `*-xorg.desktop` entries under `/usr/share/xsessions` do not change that.
+
+When ved detects GNOME ≥ 49 in a `desktop` session it:
+
+1. forces the `host` target (and skips the Xephyr question);
+2. starts the shell directly as a nested Wayland window on your desktop:
+
+   ```bash
+   dbus-run-session -- gnome-shell --devkit --wayland --wayland-display ved-$$
+   ```
+
+3. warns if the guest has no `mutter-devkit` instead of leaving you with a black
+   screen.
+
+Trade-offs: this path does not go through `gnome-session`, so autostart
+applications are not launched. That is usually desirable for a rescue/inspection
+desktop. Passing your own command (`--command`) disables the automatic selection.
+
+> **Status:** the chroot backend has been tested with Ubuntu 25.10 (GNOME 49)
+> guests. The nspawn path uses the same command and the bindings listed above; it
+> is considered experimental for GNOME 49+.
 
 ## nspawn status bar (Ctrl+A prefix)
 
@@ -289,7 +353,7 @@ Other options:
       --config FILE     Load a configuration file before applying options
       --no-install      Do not install missing packages
   -y, --yes             Answer yes to confirmation prompts
-  -n, --dry-run         Print the QEMU command instead of running it
+  -n, --dry-run         Print the command instead of running it
       --keep-temp       Keep temporary files after exit
   -v, --verbose         Show debugging output
   -h, --help            Show this help
@@ -317,17 +381,25 @@ Other options:
 # Enter an installed Linux system with chroot, sharing the host display
 ./ved --backend chroot --partition /dev/nvme0n1p2 --graphical
 
-# Launch a full GNOME/KDE/Xfce desktop from an installed system (chroot)
+# Launch a full desktop from an installed system (chroot).
+# GNOME 49+ is detected automatically and started with gnome-shell --devkit.
 ./ved --backend chroot --partition /dev/nvme0n1p2 --graphical --session desktop
 
-# Launch a full desktop with nspawn (better isolation, systemd user session)
+# Same with nspawn (experimental for GNOME 49+)
 ./ved --backend nspawn --partition /dev/nvme0n1p2 --graphical --session desktop
+
+# Inspect the exact command that would be used for a desktop session
+./ved --backend chroot --partition /dev/nvme0n1p2 --graphical --session desktop --dry-run
 
 # Boot a Linux install as a container with systemd (status bar with Ctrl+A)
 ./ved --backend nspawn --partition /dev/nvme0n1p2 --boot
 
 # Run a single graphical app (e.g. Firefox) from an installed system
 ./ved --backend nspawn --partition /dev/nvme0n1p2 --graphical --session app --command firefox
+
+# Force a specific desktop command instead of the automatic selection
+./ved --backend chroot --partition /dev/nvme0n1p2 --graphical --session desktop \
+  --command 'dbus-run-session -- gnome-shell --devkit --wayland --wayland-display ved-0'
 
 # Pass a specific USB device and reset the Bluetooth adapter
 ./ved --disk /dev/nvme0n1 --usb 413c:301a --reset-bluetooth 8087:0033
@@ -345,6 +417,7 @@ lib/
   disks.sh              disk/partition/EFI-loader/guest-OS detection
   firmware.sh           OVMF, TPM, audio, render nodes, USB detection
   display.sh            display mode selection and viewer launch
+  session_gnome.sh      guest GNOME version probe and GNOME 49+ (devkit) session
   backends/
     qemu.sh             QEMU/KVM backend
     chroot.sh           chroot backend
@@ -367,20 +440,47 @@ qemu-ubuntu.sh          original reference script (kept for history)
 - **Bluetooth disappears after the VM exits** — `ved` resets the adapter
   automatically; if it is still missing, re-run or pass `--reset-bluetooth VID:PID`.
 - **Run `./ved --dry-run …`** to inspect the exact command and diagnose flags.
+- **Black screen with a nested Xephyr window and GNOME 49+ (Ubuntu 25.10+)** —
+  GNOME Shell 49 no longer supports X11, so `gnome-session` in Xephyr starts
+  services but no shell. ved detects this and uses `gnome-shell --devkit` on the
+  host display. The guest needs `mutter-devkit` (Ubuntu: `mutter-dev-bin`). Check
+  the guest's GNOME version with `chroot <root> gnome-shell --version`.
+- **`GNOME 49+ needs mutter-devkit in the guest`** — install the package that
+  provides `/usr/libexec/mutter-devkit` in the installed system (Ubuntu:
+  `mutter-dev-bin`; `dpkg -S /usr/libexec/mutter-devkit` tells you which one).
+- **`Failed to start X Wayland: Directory "/tmp/.X11-unix" is not writable`**
+  (nspawn) — the X11 socket directory must be bound read-write; the shell creates
+  its own Xwayland socket there. ved binds it read-write.
+- **`Created surfaceless renderer without GPU`** (nspawn) — `/dev/dri` was bound
+  read-only or the container is not allowed to use the DRM devices. ved binds it
+  read-write; if the GPU is still missing, bind the render node explicitly and
+  allow it with `--property=DeviceAllow`.
+- **`Couldn't connect to system bus` / `endSessionDialog.js` exception, then
+  `could not connect to wayland server`** (nspawn) — the guest shell needs the
+  system D-Bus (accounts service). Without `--boot` there is no system bus in the
+  container, so ved binds the host's `/run/dbus`.
+- **Mixed GNOME versions in the guest** (e.g. `gnome-shell 49~beta` with
+  `mutter 49.0`) — happens on systems installed from a beta ISO and never fully
+  upgraded. Run `apt full-upgrade` (or the equivalent) inside the installed system
+  before reporting desktop problems.
 - **GNOME/KDE falls back to "Something has gone wrong" screen** — ensure your user
-  exists in the guest (UID 1000), try `--gui nested` (Xephyr) to isolate Wayland
-  issues, or check `journalctl --user -f` inside the session for gnome-shell errors.
+  exists in the guest (UID 1000), use `--gui host`, or check `journalctl --user -f`
+  inside the session for gnome-shell errors. For GNOME < 49, `--gui nested`
+  (Xephyr) can help to isolate Wayland issues.
 - **`Failed to connect to user scope bus via local transport: No data available`** —
   `systemd-run --user` was used in a container that was not booted with `--boot`.
-  There is no systemd user manager inside it; `ved` now falls back to
+  There is no systemd user manager inside it; `ved` falls back to
   `dbus-run-session`.
 - **`DRI3 error` / `GL Helper exited with code 512` in Xephyr** — expected with a
   nested server. `ved` forces `LIBGL_ALWAYS_SOFTWARE=1` for the `nested` target.
   Use `--gui host` if you need GPU acceleration.
+- **`ERROR: NVIDIA driver is not loaded`** — the guest ships NVIDIA userspace
+  libraries but the NVIDIA devices are not available inside the chroot/container.
+  Harmless; the session falls back to Mesa on the other GPU.
 - **`couldn't connect to control socket ... /keyring/control` or
   `fuse: failed to access mountpoint .../gvfs`** — the guest was reusing the
-  host's `/run/user/$UID`. `ved` now creates a private runtime directory for the
-  guest instead.
+  host's `/run/user/$UID`. `ved` creates a private runtime directory for the guest
+  instead.
 - **nspawn status bar not appearing** — requires a real TTY (`-t`); it won't show
   in scripts or pipes. Use `--dry-run` to verify the command.
 

@@ -101,9 +101,10 @@ chroot_detect_user() {
 }
 
 chroot_mark_time_synced() {
-    local root="$1" dir="$root/run/systemd/timesync"
+    local root="$1"
+    local dir="$root/run/systemd/timesync"
 
-    [[ "$VED_DRY_RUN" -eq 1 ]] && return 0      # NUEVO
+    [[ "$VED_DRY_RUN" -eq 1 ]] && return 0
     [[ -x "$root/usr/lib/systemd/systemd" || -x "$root/lib/systemd/systemd" ]] ||
         return 0
     mkdir -p "$dir" || return 0

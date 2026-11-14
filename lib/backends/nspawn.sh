@@ -182,7 +182,7 @@ nspawn_interactive_loop() {
     nspawn_status_bar_update_pid "$nspawn_pid"
 
     while kill -0 "$nspawn_pid" 2>/dev/null; do
-        if read -t 0.1 -n 1 -s key 2>/dev/null; then
+        if read -r -t 0.1 -n 1 -s key 2>/dev/null; then
             if [[ "$VED_NSPAWN_IN_COMMAND_MODE" -eq 1 ]]; then
                 case "${key,,}" in
                     s)

@@ -20,7 +20,7 @@ detect_platform() {
         *arch*|*manjaro*|*endeavouros*|*cachyos*)
             VED_PKG_FAMILY="arch"
             ;;
-        *suse*|*opensuse*|*sles*)
+        *suse*|*sles*)
             VED_PKG_FAMILY="suse"
             ;;
         *alpine*)

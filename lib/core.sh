@@ -85,14 +85,16 @@ VED_OVMF_VARS_FORMAT="raw"
 VED_OVMF_CODE_SECBOOT=""
 VED_OVMF_VARS_SECBOOT=""
 
-VED_VM_DIR="/var/lib/ved"
-VED_SOURCE_MOUNT="/run/ved/efi-source"
-VED_COPY_MOUNT="/run/ved/efi-copy"
-VED_CHROOT_DIR="/run/ved/root"
+VED_RUN_DIR=""
+VED_RUN_ID=""
+VED_VM_DIR=""
+VED_SOURCE_MOUNT=""
+VED_COPY_MOUNT=""
+VED_CHROOT_DIR=""
 VED_GUEST_XAUTHORITY=""
 VED_ESP_IMAGE=""
 VED_VARS_TEMP=""
-VED_QEMU_LOG="$VED_VM_DIR/qemu.log"
+VED_QEMU_LOG=""
 VED_SPICE_SOCKET=""
 VED_QEMU_PID=""
 VED_SWTPM_PID=""
@@ -209,7 +211,7 @@ cleanup_run() {
     done
 
     if [[ "${VED_KEEP_TEMP:-0}" -eq 1 ]]; then
-        info "$(t keeping_temp "$VED_VM_DIR")"
+        info "$(t keeping_temp "$VED_RUN_DIR")"
     else
         for item in "${VED_CLEANUP_FILES[@]}"; do
             [[ -n "$item" && -e "$item" ]] && rm -f -- "$item"
@@ -304,7 +306,7 @@ detect_graphical_user_identity() {
     VED_GUI_GID="$(id -g "$VED_GUI_USER" 2>/dev/null)" || return 1
     VED_GUI_HOME="$(getent passwd "$VED_GUI_USER" | cut -d: -f6)"
     VED_GUI_RUNTIME="/run/user/$VED_GUI_UID"
-    VED_SPICE_SOCKET="$VED_GUI_RUNTIME/ved-spice.sock"
+    VED_SPICE_SOCKET="$VED_GUI_RUNTIME/ved-spice-${VED_RUN_ID}.sock"
 
     return 0
 }
@@ -383,6 +385,41 @@ make_temp_dir() {
     dir="$(mktemp -d "$template")"
     cleanup_add_dir "$dir"
     printf '%s' "$dir"
+}
+
+initialize_run_directory() {
+    local run_base="${VED_RUNTIME_BASE:-/run/ved}"
+
+    mkdir -p "$run_base"
+    chmod 700 "$run_base" 2>/dev/null || true
+    VED_RUN_DIR="$(mktemp -d "$run_base/run.XXXXXX")" ||
+        die "$(t runtime_prepare_failed "$run_base")"
+    chmod 700 "$VED_RUN_DIR"
+    VED_RUN_ID="${VED_RUN_DIR##*/}"
+    cleanup_add_dir "$VED_RUN_DIR"
+
+    VED_VM_DIR="$VED_RUN_DIR/vm"
+    VED_SOURCE_MOUNT="$VED_RUN_DIR/efi-source"
+    VED_COPY_MOUNT="$VED_RUN_DIR/efi-copy"
+    VED_CHROOT_DIR="$VED_RUN_DIR/root"
+    VED_QEMU_LOG="$VED_VM_DIR/qemu.log"
+
+    mkdir -p "$VED_VM_DIR"
+    cleanup_add_dir "$VED_VM_DIR"
+}
+
+valid_efi_loader_path() {
+    local loader="$1"
+    local component
+    local -a components=()
+
+    [[ -z "$loader" ]] && return 0
+    [[ "$loader" != /* && "$loader" != *'//' && "$loader" != *$'\n'* ]] || return 1
+
+    IFS=/ read -r -a components <<<"$loader"
+    for component in "${components[@]}"; do
+        [[ -n "$component" && "$component" != "." && "$component" != ".." ]] || return 1
+    done
 }
 
 preload_config() {
@@ -617,11 +654,11 @@ parse_cli() {
                 VED_SESSION="app"
                 VED_SESSION_SET=1
                 ;;
-            --gui|--display-target)
+            --gui|--gui-target|--display-target)
                 VED_GUI_TARGET="${2:-}"
                 shift
                 ;;
-            --gui=*|--display-target=*)
+            --gui=*|--gui-target=*|--display-target=*)
                 VED_GUI_TARGET="${arg#*=}"
                 ;;
             --nested)
@@ -711,6 +748,14 @@ parse_cli() {
         *) die "$(t storage_invalid "$VED_STORAGE_MODE")" ;;
     esac
 
+    if [[ -n "$VED_RAM" && ! "$VED_RAM" =~ ^[1-9][0-9]*([MmGg])?$ ]]; then
+        die "$(t invalid_memory)"
+    fi
+
+    if [[ "$VED_EFI_LOADER_SET" -eq 1 ]] && ! valid_efi_loader_path "$VED_EFI_LOADER"; then
+        die "$(t invalid_efi_loader "$VED_EFI_LOADER")"
+    fi
+
     case "${VED_DISPLAY_MODE,,}" in
         auto|spice-gl|spice|gtk-gl|gtk|sdl|vnc|none) VED_DISPLAY_MODE="${VED_DISPLAY_MODE,,}" ;;
         *) die "$(t display_invalid "$VED_DISPLAY_MODE")" ;;
@@ -789,9 +834,7 @@ ved_main() {
     ensure_dependencies
 
     trap cleanup_run EXIT INT TERM HUP
-
-    mkdir -p "$VED_VM_DIR"
-    chmod 700 "$VED_VM_DIR" 2>/dev/null || true
+    initialize_run_directory
 
     case "$VED_BACKEND" in
         qemu) backend_qemu ;;

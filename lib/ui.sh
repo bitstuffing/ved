@@ -93,7 +93,7 @@ select_memory() {
     if [[ -n "$VED_RAM" ]]; then
         if [[ "$VED_RAM" =~ ^[0-9]+$ ]]; then
             VED_RAM="${VED_RAM}M"
-        elif [[ "$VED_RAM" =~ ^[0-9]+[MGmg]$ ]]; then
+        elif [[ "$VED_RAM" =~ ^[1-9][0-9]*[MGmg]$ ]]; then
             VED_RAM="${VED_RAM^^}"
         else
             die "$(t invalid_memory)"

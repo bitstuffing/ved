@@ -7,9 +7,6 @@ behind a friendly, interactive menu. It auto-detects your disks, EFI loaders, GP
 TPM and USB devices, installs missing packages for your distribution, and asks for
 the administrator password only once.
 
-> It started as two personal scripts (`qemu-nobara.sh` and `qemu-ubuntu.sh`, kept in the
-> repository for reference) and grew into one portable, translated tool.
-
 ---
 
 ## Table of contents
@@ -30,6 +27,7 @@ the administrator password only once.
 - [Options](#options)
 - [Examples](#examples)
 - [Project layout](#project-layout)
+- [Development and testing](#development-and-testing)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
 
@@ -141,6 +139,8 @@ The tool will:
 | **QEMU/KVM** | `-b qemu` | Runs a physical disk, a partition or an image as a full virtual machine (UEFI + SPICE). |
 | **chroot** | `-b chroot` | Mounts an installed Linux system and enters it with `chroot`. Can bind the host display/audio with `--graphical`. |
 | **systemd-nspawn** | `-b nspawn` | Mounts an installed Linux system and runs it as a container; `--boot` boots it with systemd. |
+
+> **Security:** `chroot` is not a security boundary. It runs with host privileges and exposes host kernel interfaces to the installed system. Use it only with installations you trust; use QEMU for untrusted disks or images.
 
 ## Interactive flow
 
@@ -322,16 +322,19 @@ Common options:
   -d, --disk DEVICE     Physical disk, for example /dev/nvme0n1
   -i, --image FILE      Disk image file (QEMU backend)
   -p, --partition DEV   Linux root partition (chroot/nspawn backend)
+      --root-partition DEV
+                        Alias for --partition
       --esp DEVICE      EFI system partition (auto-detected by default)
       --os TYPE         auto, linux or windows (default: auto)
-      --efi-loader PATH EFI loader relative to the ESP, or empty for the UEFI menu
+      --efi-loader PATH EFI loader relative to the ESP (no `..`), or empty for the UEFI menu
       --storage MODE    temp or persistent (default: ask)
-      --ram SIZE        Memory size, for example 8G or 8192M
+      --ram SIZE        Positive memory size, for example 8G or 8192M
       --cpus N          Number of virtual CPUs
       --accel MODE      auto, kvm or tcg (default: auto)
       --tpm             Enable TPM passthrough or a software TPM
       --no-tpm          Disable the TPM
-      --secure-boot     Use the Secure Boot OVMF firmware
+      --secure-boot     Use the Secure Boot OVMF/AAVMF firmware
+      --no-secure-boot  Disable Secure Boot
       --boot-menu       Show the QEMU boot menu (default)
       --no-boot-menu    Hide the QEMU boot menu
       --network MODE    user or none (default: user)
@@ -348,9 +351,17 @@ Common options:
   -c, --command CMD     Command to run in the chroot or nspawn backend
       --graphical       Bind the host display and audio into chroot/nspawn
       --boot            Boot the guest with systemd-nspawn instead of a command
+      --session MODE    shell, app, desktop or system (default: ask)
+      --app CMD         Run one graphical application (implies --session app)
+      --gui TARGET      Host or nested Xephyr display: host or nested (default: ask)
+      --gui-target TARGET
+                        Alias for --gui
+      --nested          Shortcut for --gui nested
+      --host-display    Shortcut for --gui host
+      --arch ARCH       QEMU guest architecture: auto, x86_64 or aarch64
 
 Other options:
-      --config FILE     Load a configuration file before applying options
+      --config FILE     Load a configuration file before applying options (trusted Bash code)
       --no-install      Do not install missing packages
   -y, --yes             Answer yes to confirmation prompts
   -n, --dry-run         Print the command instead of running it
@@ -359,6 +370,9 @@ Other options:
   -h, --help            Show this help
   -V, --version         Show the version
 ```
+
+> **Configuration security:** `--config` sources the file as Bash, including after
+> privilege escalation. Only load configuration files you control and trust.
 
 ## Examples
 
@@ -417,7 +431,7 @@ lib/
   disks.sh              disk/partition/EFI-loader/guest-OS detection
   firmware.sh           OVMF, TPM, audio, render nodes, USB detection
   display.sh            display mode selection and viewer launch
-  session_gnome.sh      guest GNOME version probe and GNOME 49+ (devkit) session
+  session.sh            guest desktop probing and session setup
   backends/
     qemu.sh             QEMU/KVM backend
     chroot.sh           chroot backend
@@ -425,9 +439,27 @@ lib/
 locale/
   en.sh                 English messages
   es.sh                 Spanish messages
-qemu-nobara.sh          original reference script (kept for history)
-qemu-ubuntu.sh          original reference script (kept for history)
+tests/
+  cli_test.sh           non-privileged CLI regression tests
+.github/workflows/
+  ci.yml                GitHub Actions validation workflow
 ```
+
+## Development and testing
+
+The checks do not mount devices, request `sudo`, start QEMU, or modify guest
+systems. Run them locally from the repository root:
+
+```bash
+make syntax  # Parse every Bash file
+make test    # Run non-privileged CLI regression tests
+make lint    # Run ShellCheck (requires shellcheck)
+make check   # Run syntax, tests and ShellCheck
+```
+
+GitHub Actions runs `make check` for every push and pull request. On Fedora/Nobara,
+install ShellCheck locally with `sudo dnf install ShellCheck`; on Debian/Ubuntu use
+`sudo apt install shellcheck`.
 
 ## Troubleshooting
 

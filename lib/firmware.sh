@@ -55,17 +55,11 @@ detect_aavmf_files() {
         code_candidates=(
             /usr/share/AAVMF/AAVMF_CODE.secboot.fd
             /usr/share/edk2/aarch64/QEMU_EFI.secboot.fd
-            /usr/share/AAVMF/AAVMF_CODE.fd
-            /usr/share/edk2/aarch64/QEMU_EFI.fd
-            /usr/share/edk2/aarch64/QEMU_EFI-pflash.raw
-            /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
-            /usr/share/edk2/aarch64/QEMU_CODE.fd
         )
         vars_candidates=(
             /usr/share/AAVMF/AAVMF_VARS.secboot.fd
-            /usr/share/AAVMF/AAVMF_VARS.fd
-            /usr/share/edk2/aarch64/QEMU_VARS.fd
-            /usr/share/qemu-efi-aarch64/QEMU_VARS.fd
+            /usr/share/edk2/aarch64/QEMU_VARS.secboot.fd
+            /usr/share/qemu-efi-aarch64/QEMU_VARS.secboot.fd
         )
     else
         code_candidates=(
@@ -99,19 +93,35 @@ detect_aavmf_files() {
     done
 
     if [[ -z "$found_code" ]]; then
-        found_code="$(find /usr/share/AAVMF /usr/share/edk2/aarch64 /usr/share/qemu-efi-aarch64 \
-            -maxdepth 2 -type f \( -name 'AAVMF_CODE*' -o -name 'QEMU_EFI*' -o -name 'QEMU_CODE*' \) \
-            2>/dev/null | sort | head -n1 || true)"
+        if [[ "$VED_SECURE_BOOT" -eq 1 ]]; then
+            found_code="$(find /usr/share/AAVMF /usr/share/edk2/aarch64 /usr/share/qemu-efi-aarch64 \
+                -maxdepth 2 -type f \( -iname 'AAVMF_CODE*secboot*' -o -iname 'QEMU_EFI*secboot*' -o -iname 'QEMU_CODE*secboot*' \) \
+                2>/dev/null | sort | head -n1 || true)"
+        else
+            found_code="$(find /usr/share/AAVMF /usr/share/edk2/aarch64 /usr/share/qemu-efi-aarch64 \
+                -maxdepth 2 -type f \( -name 'AAVMF_CODE*' -o -name 'QEMU_EFI*' -o -name 'QEMU_CODE*' \) \
+                2>/dev/null | sort | head -n1 || true)"
+        fi
     fi
 
     if [[ -z "$found_vars" ]]; then
-        found_vars="$(find /usr/share/AAVMF /usr/share/edk2/aarch64 /usr/share/qemu-efi-aarch64 \
-            -maxdepth 2 -type f \( -name 'AAVMF_VARS*' -o -name 'QEMU_VARS*' \) \
-            2>/dev/null | sort | head -n1 || true)"
+        if [[ "$VED_SECURE_BOOT" -eq 1 ]]; then
+            found_vars="$(find /usr/share/AAVMF /usr/share/edk2/aarch64 /usr/share/qemu-efi-aarch64 \
+                -maxdepth 2 -type f \( -iname 'AAVMF_VARS*secboot*' -o -iname 'QEMU_VARS*secboot*' \) \
+                2>/dev/null | sort | head -n1 || true)"
+        else
+            found_vars="$(find /usr/share/AAVMF /usr/share/edk2/aarch64 /usr/share/qemu-efi-aarch64 \
+                -maxdepth 2 -type f \( -name 'AAVMF_VARS*' -o -name 'QEMU_VARS*' \) \
+                2>/dev/null | sort | head -n1 || true)"
+        fi
     fi
 
-    [[ -n "$found_code" ]] || die "$(t aavmf_missing)"
-    [[ -n "$found_vars" ]] || die "$(t aavmf_missing)"
+    if [[ -z "$found_code" || -z "$found_vars" ]]; then
+        if [[ "$VED_SECURE_BOOT" -eq 1 ]]; then
+            die "$(t aavmf_secure_missing)"
+        fi
+        die "$(t aavmf_missing)"
+    fi
 
     VED_OVMF_CODE="$found_code"
     VED_OVMF_VARS_TEMPLATE="$found_vars"
@@ -125,6 +135,9 @@ detect_aavmf_files() {
 detect_ovmf_files() {
     if [[ "$VED_ARCH" == "aarch64" ]]; then
         detect_aavmf_files
+        if [[ "$VED_SECURE_BOOT" -eq 1 ]]; then
+            info "$(t secure_boot_enabled)"
+        fi
         return
     fi
 

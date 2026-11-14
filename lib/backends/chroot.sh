@@ -237,6 +237,8 @@ backend_chroot() {
     local user
     local command=""
 
+    warn "$(t chroot_security_warning)"
+
     if [[ -n "$VED_ROOT_PARTITION" ]]; then
         [[ -b "$VED_ROOT_PARTITION" ]] ||
             die "$(t partition_missing "$VED_ROOT_PARTITION")"

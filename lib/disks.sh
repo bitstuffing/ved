@@ -259,6 +259,8 @@ select_efi_loader() {
         if [[ -z "$VED_EFI_LOADER" ]]; then
             return
         fi
+        valid_efi_loader_path "$VED_EFI_LOADER" ||
+            die "$(t invalid_efi_loader "$VED_EFI_LOADER")"
         if [[ ! -f "$VED_SOURCE_MOUNT/$VED_EFI_LOADER" ]]; then
             die "$(t loader_missing "$VED_SOURCE_MOUNT/$VED_EFI_LOADER")"
         fi

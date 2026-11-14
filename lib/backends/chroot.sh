@@ -82,6 +82,11 @@ chroot_detect_user() {
         return
     fi
 
+    if ! session_is_graphical; then 
+        printf 'root'
+        return
+    fi
+
     if [[ -r "$root/etc/passwd" ]]; then
         if [[ "$VED_GRAPHICAL" -eq 1 && -n "${VED_GUI_UID:-}" ]]; then
             user="$(awk -F: -v uid="$VED_GUI_UID" \
@@ -93,6 +98,20 @@ chroot_detect_user() {
     fi
 
     printf '%s' "$user"
+}
+
+chroot_mark_time_synced() {
+    local root="$1" dir="$root/run/systemd/timesync"
+
+    [[ "$VED_DRY_RUN" -eq 1 ]] && return 0      # NUEVO
+    [[ -x "$root/usr/lib/systemd/systemd" || -x "$root/lib/systemd/systemd" ]] ||
+        return 0
+    mkdir -p "$dir" || return 0
+    cleanup_add_file "$dir/synchronized"
+    (
+        while :; do : >"$dir/synchronized"; sleep 1; done
+    ) &
+    cleanup_add_pid "$!"
 }
 
 chroot_apply_user_ids() {
@@ -301,6 +320,8 @@ backend_chroot() {
     fi
 
     chroot_prepare_mounts "$root"
+
+    chroot_mark_time_synced "$root" 
 
     if session_is_graphical; then
         command="$(session_build_command_ex "$root" || true)"

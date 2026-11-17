@@ -3,6 +3,47 @@
 # shell is started around it. It is a compatibility layer, not the installed
 # Windows kernel (see the README for the exact limitations).
 
+PWSH_RUNNER=()
+PWSH_RUNNER_HOME=""
+
+# runuser does not reset HOME. Always resolve it from passwd at launch time and
+# build a clean environment, so pwsh/Wine never inherit root's HOME.
+powershell_user_home() {
+    local user="$1" home
+
+    [[ -n "$user" && "$user" != "root" ]] || return 1
+    home="$(getent passwd "$user" 2>/dev/null | cut -d: -f6)"
+    [[ -n "$home" && "$home" != "/" ]] || home="${VED_GUI_HOME:-}"
+    [[ -n "$home" && "$home" != "/" ]] || return 1
+    printf '%s' "$home"
+}
+
+powershell_gui_runner() {
+    local user="$1" home runtime=""
+
+    home="$(powershell_user_home "$user")" || return 1
+    [[ -z "${VED_GUI_UID:-}" ]] || runtime="/run/user/$VED_GUI_UID"
+
+    PWSH_RUNNER_HOME="$home"
+    PWSH_RUNNER=(
+        runuser -u "$user" -- env -i
+        "HOME=$home"
+        "USER=$user"
+        "LOGNAME=$user"
+        "SHELL=/bin/bash"
+        "PATH=/usr/local/bin:/usr/bin:/bin"
+        "TERM=${TERM:-xterm-256color}"
+        "LANG=${LANG:-C.UTF-8}"
+        "XDG_DATA_HOME=$home/.local/share"
+        "XDG_CONFIG_HOME=$home/.config"
+        "POWERSHELL_TELEMETRY_OPTOUT=1"
+        "POWERSHELL_UPDATECHECK=Off"
+    )
+    [[ -z "$runtime" ]] || PWSH_RUNNER+=("XDG_RUNTIME_DIR=$runtime")
+
+    debug "shell environment: user=$user home=$home"
+}
+
 powershell_binary() {
     if have pwsh; then
         printf 'pwsh'
@@ -175,15 +216,9 @@ powershell_run_pwsh() {
     binary="$(powershell_binary)" || powershell_fail_missing
 
     if [[ -n "${VED_GUI_USER:-}" ]]; then
-        runner=(
-            runuser -u "$VED_GUI_USER" -- env
-            "HOME=$VED_GUI_HOME"
-            "USER=$VED_GUI_USER"
-            "LOGNAME=$VED_GUI_USER"
-            "TERM=${TERM:-xterm-256color}"
-            "PATH=${PATH:-/usr/local/bin:/usr/bin:/bin}"
-            "LANG=${LANG:-C.UTF-8}"
-        )
+        powershell_gui_runner "$VED_GUI_USER" ||
+            die "$(t shell_user_invalid "$VED_GUI_USER")"
+        runner=("${PWSH_RUNNER[@]}")
     fi
 
     if [[ -n "$command" ]]; then
@@ -216,21 +251,18 @@ powershell_run_pwsh() {
 }
 
 powershell_run_cmd() {
-    local command="$1"
-    local prefix="${VED_GUI_HOME:-/root}/.local/share/ved/wine"
+    local command="$1" prefix
     local uid="${VED_GUI_UID:-0}" gid="${VED_GUI_GID:-0}"
     local -a runner=()
     local -a wine_command=(wine cmd.exe)
 
     [[ -n "${VED_GUI_USER:-}" ]] || die "$(t wine_needs_user)"
+    powershell_gui_runner "$VED_GUI_USER" ||
+        die "$(t shell_user_invalid "$VED_GUI_USER")"
+    prefix="$PWSH_RUNNER_HOME/.local/share/ved/wine"
 
-    runner=(
-        runuser -u "$VED_GUI_USER" -- env
-        "HOME=$VED_GUI_HOME"
-        "USER=$VED_GUI_USER"
-        "LOGNAME=$VED_GUI_USER"
-        "TERM=${TERM:-xterm-256color}"
-        "PATH=${PATH:-/usr/local/bin:/usr/bin:/bin}"
+    runner=("${PWSH_RUNNER[@]}")
+    runner+=(
         "WINEPREFIX=$prefix"
         "WINEDEBUG=-all"
         "WINEDLLOVERRIDES=mscoree,mshtml="
@@ -268,9 +300,15 @@ powershell_run_cmd() {
 }
 
 backend_powershell() {
-    local profile command="${VED_COMMAND:-}" mount_dir script_dir dir
+    local profile command="${VED_COMMAND:-}" mount_dir script_dir dir resolved_home
 
     detect_graphical_user_optional
+
+    if [[ -n "${VED_GUI_USER:-}" ]]; then
+        resolved_home="$(powershell_user_home "$VED_GUI_USER")" ||
+            die "$(t shell_user_invalid "$VED_GUI_USER")"
+        VED_GUI_HOME="$resolved_home"
+    fi
 
     if [[ "$VED_SHELL" == "pwsh" ]]; then
         powershell_binary >/dev/null 2>&1 || powershell_fail_missing

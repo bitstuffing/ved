@@ -44,7 +44,7 @@ Common options:
   -L, --lang CODE       Language code: en, es (default: from the environment)
   -d, --disk DEVICE     Physical disk, for example /dev/nvme0n1
   -i, --image FILE      Disk image file (QEMU backend)
-  -p, --partition DEV   Linux root partition (chroot/nspawn backend)
+  -p, --partition DEV   Linux root partition (chroot/nspawn) or Windows partition
       --esp DEVICE      EFI system partition (auto-detected by default)
       --os TYPE         auto, linux or windows (default: auto)
       --efi-loader PATH EFI loader relative to the ESP, or empty for the UEFI menu
@@ -72,6 +72,7 @@ Common options:
   -c, --command CMD     Command to run in the chroot, nspawn or powershell backend
       --shell NAME      powershell backend: pwsh or cmd (default: pwsh)
       --windows-write   Mount the Windows partition read-write (default: read-only)
+      --windows-ro      Force read-only (useful to override a config file)
       --windows-drive L Drive letter for the partition in pwsh (default: C)
       --graphical       Bind the host display and audio into chroot/nspawn
       --boot            Boot the guest with systemd-nspawn instead of a command
@@ -304,6 +305,7 @@ Other options:
     [shell_cmd]="cmd (Wine compatibility layer, no VM)"
     [select_shell_prompt]="Option [1]: "
     [shell_invalid]="Invalid Windows shell: %s"
+    [shell_user_invalid]="Could not determine the home directory for user: %s"
     [windows_drive_invalid]="Invalid Windows drive letter: %s"
     [windows_no_partition]="No NTFS or BitLocker partition was found on: %s"
     [windows_partitions]="Detected Windows partitions:"

@@ -50,14 +50,37 @@ run_windows_helpers() (
     # shellcheck source=../lib/backends/powershell.sh
     source "$PROJECT_ROOT/lib/backends/powershell.sh"
 
+    local test_user test_uid test_gid
+    test_user="$(id -un)"
+    if [[ "$test_user" == "root" ]]; then
+        test_user="$(awk -F: '$1 != "root" && $3 != 0 && $6 != "" && $6 != "/" { print $1; exit }' /etc/passwd)"
+    fi
+    [[ -n "$test_user" ]]
+    test_uid="$(id -u "$test_user")"
+    test_gid="$(id -g "$test_user")"
+
     VED_GUI_USER=""
     VED_GUI_UID=""
     VED_GUI_GID=""
     [[ "$(powershell_mount_options ro)" == "ro,nosuid,nodev" ]]
-    VED_GUI_USER="bit"
-    VED_GUI_UID=1000
-    VED_GUI_GID=1000
-    [[ "$(powershell_mount_options rw)" == "rw,nosuid,nodev,uid=1000,gid=1000" ]]
+    VED_GUI_USER="$test_user"
+    VED_GUI_UID="$test_uid"
+    VED_GUI_GID="$test_gid"
+    [[ "$(powershell_mount_options rw)" == "rw,nosuid,nodev,uid=$test_uid,gid=$test_gid" ]]
+
+    local expected_home
+    expected_home="$(getent passwd "$test_user" | cut -d: -f6)"
+    powershell_gui_runner "$VED_GUI_USER"
+    [[ "$PWSH_RUNNER_HOME" == "$expected_home" ]]
+    [[ " ${PWSH_RUNNER[*]} " == *" env -i "* ]]
+    [[ " ${PWSH_RUNNER[*]} " == *" HOME=$expected_home "* ]]
+    [[ " ${PWSH_RUNNER[*]} " == *" USER=$VED_GUI_USER "* ]]
+    [[ " ${PWSH_RUNNER[*]} " == *" LOGNAME=$VED_GUI_USER "* ]]
+    [[ " ${PWSH_RUNNER[*]} " == *" XDG_DATA_HOME=$expected_home/.local/share "* ]]
+    [[ " ${PWSH_RUNNER[*]} " == *" XDG_CONFIG_HOME=$expected_home/.config "* ]]
+    if powershell_gui_runner root; then
+        return 1
+    fi
 
     VED_WINDOWS_DRIVE="D"
     VED_WINDOWS_MOUNT="/mnt/windows-test"
@@ -65,19 +88,31 @@ run_windows_helpers() (
     local script_dir="$TMPDIR_TEST/gui-scripts"
     mkdir -p "$script_dir"
     VED_WINDOWS_SCRIPT_DIR="$script_dir"
+    [[ "$(powershell_script_dir)" == "$script_dir" ]]
+    VED_WINDOWS_SCRIPT_DIR=""
+    [[ "$(powershell_script_dir)" == "$TMPDIR_TEST" ]]
+    VED_WINDOWS_SCRIPT_DIR="$script_dir"
     local profile
     profile="$(powershell_write_profile)"
     [[ "$profile" == "$script_dir/ved-profile.ps1" ]]
     grep -Fq "New-PSDrive -Name 'D'" "$profile"
     grep -Fq "Set-Location 'D:" "$profile"
     grep -Fq "Set-PSReadLineOption -HistorySavePath" "$profile"
+    grep -Fq "'$script_dir/PSReadLine_history.txt'" "$profile"
+    ! grep -Fq '/run/ved/' "$profile"
 
     local history
     history="$(powershell_prepare_history)"
     [[ "$history" == "$script_dir/PSReadLine_history.txt" ]]
     [[ -f "$history" ]]
+    [[ "$(stat -c '%a' "$history")" == "600" ]]
 
     lsblk() {
+        local args=" $* "
+        if [[ "$args" == *" MOUNTPOINT "* ]]; then
+            printf '%s\n' '/mnt/existing'
+            return 0
+        fi
         printf '%s\n' \
             '/dev/nvme0n1p1 vfat EFI' \
             '/dev/nvme0n1p2 ntfs OS' \
@@ -90,6 +125,15 @@ run_windows_helpers() (
     [[ "${#candidates[@]}" -eq 2 ]]
     [[ "${candidates[0]}" == "/dev/nvme0n1p2" ]]
     [[ "${candidates[1]}" == "/dev/nvme0n1p4" ]]
+    [[ "$(powershell_existing_mountpoint /dev/nvme0n1p2)" == "/mnt/existing" ]]
+
+    local fake_win="$TMPDIR_TEST/fake-win"
+    mkdir -p "$fake_win"
+    if powershell_is_hibernated "$fake_win"; then
+        return 1
+    fi
+    : >"$fake_win/hiberfil.sys"
+    powershell_is_hibernated "$fake_win"
 
     have() { [[ "$1" == "pwsh" ]]; }
     VED_DRY_RUN=1
@@ -101,6 +145,16 @@ run_windows_helpers() (
     dry_output="$(powershell_run_pwsh "$profile" 'Get-Location')"
     [[ "$dry_output" == *"-File $script_dir/ved-command.ps1"* ]]
     grep -Fq 'Get-Location' "$script_dir/ved-command.ps1"
+
+    VED_GUI_USER="$test_user"
+    dry_output="$(powershell_run_pwsh "$profile" "")"
+    [[ "$dry_output" == *"HOME=$expected_home"* ]]
+    [[ "$dry_output" != *"HOME=/root"* ]]
+
+    dry_output="$(powershell_run_cmd "")"
+    [[ "$dry_output" == *"HOME=$expected_home"* ]]
+    [[ "$dry_output" == *"WINEPREFIX=$expected_home/.local/share/ved/wine"* ]]
+    [[ "$dry_output" != *"HOME=/root"* ]]
 )
 
 run_powershell_hint() (
@@ -119,6 +173,10 @@ run_powershell_hint() (
     VED_PKG_FAMILY="debian"
     output="$(powershell_install_hint)"
     [[ "$output" == *"sudo apt-get install -y powershell"* ]]
+
+    VED_PKG_FAMILY="arch"
+    output="$(powershell_install_hint)"
+    [[ "$output" == *"powershell-bin"* ]]
 )
 
 run_locale_messages() (
@@ -126,13 +184,37 @@ run_locale_messages() (
     source "$PROJECT_ROOT/lib/i18n.sh"
     VED_ROOT="$PROJECT_ROOT"
 
+    check_keys() {
+        local key
+        for key in backend_powershell shell_user_invalid windows_temp_failed; do
+            [[ "$(t "$key")" != "$key" ]]
+        done
+    }
+
     VED_LANG=en
     ved_i18n_load
-    [[ "$(t backend_powershell)" != "backend_powershell" ]]
+    check_keys
 
     VED_LANG=es
     ved_i18n_load
-    [[ "$(t backend_powershell)" != "backend_powershell" ]]
+    check_keys
+)
+
+run_cli_parsing() (
+    # shellcheck source=../lib/core.sh
+    source "$PROJECT_ROOT/lib/core.sh"
+    t() { printf '%s' "$1"; }
+
+    parse_cli --backend PWSH --shell CMD --windows-drive d --windows-write
+    [[ "$VED_BACKEND" == "powershell" ]]
+    [[ "$VED_SHELL" == "cmd" ]]
+    [[ "$VED_WINDOWS_DRIVE" == "D" ]]
+    [[ "$VED_WINDOWS_WRITE" -eq 1 ]]
+
+    parse_cli --backend windows --shell powershell --windows-ro --windows-drive z
+    [[ "$VED_SHELL" == "pwsh" ]]
+    [[ "$VED_WINDOWS_DRIVE" == "Z" ]]
+    [[ "$VED_WINDOWS_WRITE" -eq 0 ]]
 )
 
 run_ved() {
@@ -182,7 +264,11 @@ run_ved powershell_backend_alias 0 'ved 2.1.0' --backend pwsh --version
 run_ved powershell_backend_alias_windows 0 'ved 2.1.0' --backend windows --version
 run_ved powershell_invalid_shell 1 'Invalid Windows shell: fish' --backend powershell --shell fish --version
 run_ved powershell_invalid_drive 1 'Invalid Windows drive letter: CC' --backend powershell --windows-drive CC --version
+run_ved powershell_shell_alias 0 'ved 2.1.0' --backend powershell --shell powershell --version
+run_ved powershell_shell_cmd 0 'ved 2.1.0' --backend powershell --shell cmd --version
+run_ved powershell_windows_write 0 'ved 2.1.0' --backend powershell --windows-write --version
 run_ved help_powershell 0 'Mount a Windows partition and open pwsh or cmd' --help
+run_ved help_windows_ro 0 '--windows-ro' --help
 run_ved zero_ram 1 'Invalid format. Use, for example: 8G, 16G or 8192M.' --ram 0M --version
 run_ved efi_loader_traversal 1 'Invalid EFI loader path: ../etc/shadow' --efi-loader ../etc/shadow --version
 
@@ -208,6 +294,12 @@ if run_locale_messages; then
     pass 'backend locale messages'
 else
     fail 'backend locale messages'
+fi
+
+if run_cli_parsing; then
+    pass 'CLI option normalization'
+else
+    fail 'CLI option normalization'
 fi
 
 if ((failed)); then

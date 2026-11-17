@@ -4,8 +4,8 @@
 
 `ved` is a single, modular Bash tool that wraps QEMU/KVM, `chroot`, `systemd-nspawn`
 and `pwsh`/Wine behind a friendly, interactive menu. It auto-detects your disks, EFI loaders, GPUs,
-TPM and USB devices, installs missing packages for your distribution, and asks for
-the administrator password only once.
+TPM and USB devices, installs missing OS packages for your distribution (PowerShell is a
+deliberate exception), and asks for the administrator password only once.
 
 ---
 
@@ -18,6 +18,10 @@ the administrator password only once.
 - [Quick start](#quick-start)
 - [Backends](#backends)
 - [PowerShell / cmd on a Windows partition (no VM)](#powershell--cmd-on-a-windows-partition-no-vm)
+  - [Installing pwsh](#installing-pwsh)
+  - [What the backend does](#what-the-backend-does)
+  - [Verifying the PowerShell environment](#verifying-the-powershell-environment)
+  - [Limitations — please read](#limitations--please-read)
 - [Interactive flow](#interactive-flow)
 - [USB devices (webcam, Bluetooth/AirPods, phones)](#usb-devices-webcam-bluetoothairpods-phones)
 - [Display and OpenGL](#display-and-opengl)
@@ -29,6 +33,9 @@ the administrator password only once.
 - [Examples](#examples)
 - [Project layout](#project-layout)
 - [Development and testing](#development-and-testing)
+  - [What the suite covers](#what-the-suite-covers)
+  - [Adding a test](#adding-a-test)
+  - [Manual smoke tests](#manual-smoke-tests)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
 
@@ -91,6 +98,10 @@ dependencies are:
 | NTFS access (powershell backend) | `ntfs-3g` (or kernel `ntfs3` support) |
 | cmd shell (optional) | `wine` |
 | Nested X11 (optional) | `Xephyr` (only for guests that still support X11 sessions) |
+
+`pwsh` must be installed manually. `ved` never tries to add a `powershell` package
+automatically, because on Fedora/RHEL that name is either missing or not the
+PowerShell 7 runtime. See [Installing pwsh](#installing-pwsh).
 
 **Requirements inside the installed (guest) system** for a full graphical desktop:
 
@@ -166,25 +177,62 @@ available, and neither starts QEMU:
 
 | Mode | Command | What it is | What you get |
 | --- | --- | --- | --- |
-| `pwsh` (default) | `pwsh -NoProfile` | Microsoft's **native Linux PowerShell 7** | A real PowerShell prompt. `ved` injects a small startup script that creates a `C:` PSDrive pointing at the mount and moves you there, so the prompt reads `PS C:\>`. |
+| `pwsh` (default) | `pwsh -NoLogo -NoProfile -NoExit -File <ved-profile.ps1>` | Microsoft's **native Linux PowerShell 7** | A real PowerShell prompt. `ved` injects a small startup script that creates a `C:` PSDrive pointing at the mount and moves you there, so the prompt reads `PS C:\>`. |
 | `cmd` | `wine cmd.exe` | **Wine's** `cmd.exe` reimplementation | A familiar `cmd` prompt. The Windows partition is exposed as `W:` (Wine keeps its own `C:` intact). Requires `wine`. |
 
 ```bash
 # PowerShell 7 on the detected Windows partition of a disk
 ./ved -b powershell -d /dev/nvme0n1
 
-# Explicit partition, PowerShell, read-write
+# Explicit partition; read-only is already the default
+./ved -b powershell -p /dev/nvme0n1p3
+
+# Allow writes (only when Windows is shut down cleanly, not hibernated)
 ./ved -b powershell -p /dev/nvme0n1p3 --windows-write
+
+# Reassert read-only, e.g. after a config file enabled writes
+./ved -b powershell -p /dev/nvme0n1p3 --windows-ro
+
+# Map the partition to D: instead of C:
+./ved -b powershell -p /dev/nvme0n1p3 --windows-drive D
 
 # Wine cmd instead of PowerShell
 ./ved -b powershell -p /dev/nvme0n1p3 --shell cmd
 
-# One-shot command (no interactive prompt)
+# One-shot command: ved dot-sources the C: mapping first, then runs your command
 ./ved -b powershell -p /dev/nvme0n1p3 -c 'Get-ChildItem C:\Windows | Select-Object -First 5'
 
 # Inspect the mount and shell commands without running them
 ./ved -b powershell -p /dev/nvme0n1p3 --shell cmd --dry-run
 ```
+
+### Installing pwsh
+
+PowerShell 7 is not in most distributions' default repositories. `ved` will
+never run `dnf install powershell` for you; install it once, then re-run `ved`.
+
+Fedora / RHEL / Nobara:
+
+```bash
+curl -fsSL -O https://packages.microsoft.com/config/rhel/9/packages-microsoft-prod.rpm
+sudo rpm -i packages-microsoft-prod.rpm
+sudo dnf install -y powershell
+pwsh --version
+```
+
+Debian / Ubuntu (adjust the version in the URL if needed):
+
+```bash
+wget -q https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb
+sudo dpkg -i packages-microsoft-prod.deb
+sudo apt-get update
+sudo apt-get install -y powershell
+```
+
+Arch: `yay -S powershell-bin`. For other distributions, see the
+[official installation docs](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-linux).
+If you prefer not to install PowerShell, use `--shell cmd`; Wine comes from the
+standard repositories.
 
 ### What the backend does
 
@@ -197,12 +245,33 @@ available, and neither starts QEMU:
    (Windows Fast Startup), because writing to a hibernated NTFS volume corrupts it.
    If the partition is already mounted by your desktop, `ved` reuses that mount
    point instead of mounting it twice.
-3. **Creates a private startup script** in the temporary run directory. It never
-   touches your real PowerShell profile. It maps the mount to the drive letter
-   chosen with `--windows-drive` (default `C`).
-4. **Drops privileges for the shell.** When invoked through `sudo`, `pwsh` (and
-   Wine, which refuses to run as root) is started as your original user via
-   `runuser`, with the mount owned by that UID/GID.
+3. **Creates private helper files.** The startup script is written to a
+   user-owned `/tmp/ved-shell.XXXXXX` directory, not to the root-only
+   `/run/ved` runtime directory. A private `PSReadLine_history.txt` is created
+   there too. Your real PowerShell profile is never touched, and in command mode
+   (`-c`) the startup script is dot-sourced before your command.
+4. **Drops privileges correctly.** `pwsh` and Wine are started with `runuser`
+   and a clean environment: `HOME`, `USER` and `LOGNAME` are re-read from
+   `passwd`, `XDG_DATA_HOME`/`XDG_CONFIG_HOME` point to that home, and no root
+   variables are inherited. In `cmd` mode the `WINEPREFIX` is derived from the
+   same home.
+5. **Cleans up.** The NTFS mount lives under `/tmp/ved-windows.XXXXXX`. The
+   mount, helper scripts and history file are removed on exit; use `--keep-temp`
+   if you want to inspect them.
+
+### Verifying the PowerShell environment
+
+If the prompt behaves strangely, run these two lines in the `PS C:\>` prompt:
+
+```powershell
+$env:HOME
+(Get-PSReadLineOption).HistorySavePath
+```
+
+You should see your normal home (for example `/home/<user>`) and a path under
+`/tmp/ved-shell.XXXXXX/PSReadLine_history.txt`. Seeing `/root` means an older
+`ved` version or a wrapper changed the environment; re-run with `-v` and check
+the `shell environment: user=... home=...` debug line.
 
 ### Limitations — please read
 
@@ -213,15 +282,16 @@ available, and neither starts QEMU:
   Wine's `cmd` instead.
 - Read-only is the default on purpose. Most inspection and repair tasks work
   fine read-only; enable `--windows-write` only when you know the volume is not
-  hibernated and you really want to change files.
+  hibernated and you really want to change files. Linux NTFS mounts do not
+  reproduce Windows ACL semantics exactly, so be careful with permissions.
 - **BitLocker**: encrypted partitions must be unlocked first (for example with
   `dislocker`), then pass the unlocked device with `--partition`.
-- `wine` cannot run as root. If you start `ved` as root directly (not through
-  `sudo`), use `--shell pwsh`; the `cmd` mode will explain what to do.
-- **`pwsh` is never installed automatically.** Fedora/RHEL do not ship PowerShell
-  in their default repositories, so `ved` detects it and prints the steps below
-  instead of letting `dnf install powershell` fail. Wine `cmd` works with packages
-  from the standard repositories.
+- `wine` cannot run as root. Start `ved` through `sudo` from your normal user
+  account for `--shell cmd`. `pwsh` can run either as that user or directly as
+  root.
+- **`pwsh` is never installed automatically.** See
+  [Installing pwsh](#installing-pwsh); if it is missing, `ved` prints the steps
+  instead of letting a package transaction fail.
 
 ## Interactive flow
 
@@ -409,7 +479,7 @@ Common options:
   -L, --lang CODE       Language code: en, es (default: from the environment)
   -d, --disk DEVICE     Physical disk, for example /dev/nvme0n1
   -i, --image FILE      Disk image file (QEMU backend)
-  -p, --partition DEV   Linux root partition (chroot/nspawn backend)
+  -p, --partition DEV   Linux root partition (chroot/nspawn) or Windows partition
       --root-partition DEV
                         Alias for --partition
       --esp DEVICE      EFI system partition (auto-detected by default)
@@ -439,6 +509,7 @@ Common options:
   -c, --command CMD     Command to run in the chroot, nspawn or powershell backend
       --shell NAME      powershell backend: pwsh or cmd (default: pwsh)
       --windows-write   Mount the Windows partition read-write (default: read-only)
+      --windows-ro      Force read-only (useful to override a config file)
       --windows-drive L Drive letter for the partition in pwsh (default: C)
       --graphical       Bind the host display and audio into chroot/nspawn
       --boot            Boot the guest with systemd-nspawn instead of a command
@@ -515,6 +586,9 @@ Other options:
 # Same, but with Wine cmd and an explicit partition
 ./ved -b powershell -p /dev/nvme0n1p3 --shell cmd
 
+# Force read-only and use D: instead of C:
+./ved -b powershell -p /dev/nvme0n1p3 --windows-ro --windows-drive D
+
 # Run one PowerShell command against the Windows partition
 ./ved -b powershell -p /dev/nvme0n1p3 -c 'Get-ChildItem C:\'
 ```
@@ -548,19 +622,88 @@ tests/
 
 ## Development and testing
 
-The checks do not mount devices, request `sudo`, start QEMU, or modify guest
-systems. Run them locally from the repository root:
+The automated checks are deliberately safe: they never mount devices, call
+`sudo`, start QEMU, open `pwsh`/Wine, or touch installed systems. They run as a
+normal user, use a private temporary directory, and stub external tools such as
+`lsblk`, `have` and `t` where needed.
+
+Run them from the repository root:
 
 ```bash
-make syntax  # Parse every Bash file
-make test    # Run non-privileged CLI regression tests
-make lint    # Run ShellCheck (requires shellcheck)
-make check   # Run syntax, tests and ShellCheck
+make syntax  # bash -n on ved, lib/*.sh, locale/*.sh
+make test    # non-privileged CLI regression tests
+make lint    # ShellCheck (skipped with a warning if not installed)
+make check   # syntax + test + lint; this is the default target
 ```
 
-GitHub Actions runs `make check` for every push and pull request. On Fedora/Nobara,
-install ShellCheck locally with `sudo dnf install ShellCheck`; on Debian/Ubuntu use
-`sudo apt install shellcheck`.
+Each check prints `ok - <name>`; a failure prints `not ok - <name>` and makes the
+suite exit non-zero. GitHub Actions runs `make check` on every push and pull
+request (`.github/workflows/ci.yml`) and installs ShellCheck on the runner.
+
+### What the suite covers
+
+- **CLI parsing and validation**: version/help, backend and shell aliases,
+  invalid options, drive-letter validation, EFI loader traversal, RAM format.
+- **Option normalization**: case-insensitive backends/shells, `--windows-write`
+  and `--windows-ro` precedence, lowercase drive letters uppercased.
+- **Locale loading**: English and Spanish contain the Windows backend keys, and
+  missing keys fall back to the key name rather than crashing.
+- **Runtime directories**: each run gets an isolated directory and cleanup
+  removes it.
+- **Windows backend helpers**:
+  - mount options with and without a graphical user;
+  - NTFS/BitLocker candidate detection and already-mounted partition reuse;
+  - hibernation detection via `hiberfil.sys`;
+  - generated `C:` PSDrive script, private PSReadLine history path, and the
+    absence of root-only `/run/ved` paths in generated scripts;
+  - clean `runuser` environment for both `pwsh` and Wine: `HOME`, `USER`,
+    `LOGNAME` and `XDG_*` come from `passwd`, never from root;
+  - dry-run construction of the interactive, one-shot and `cmd` commands;
+  - distribution-specific PowerShell install hints.
+
+### Adding a test
+
+For a CLI-level check, add one line next to the other `run_ved` calls:
+
+```bash
+run_ved my_new_check 1 'Expected error text' --backend powershell --shell fish
+```
+
+For internal helpers, add a function that runs in a subshell, source only the
+modules it needs, stub external commands, and call `pass`/`fail` explicitly:
+
+```bash
+run_my_helper() (
+    # shellcheck source=../lib/core.sh
+    source "$PROJECT_ROOT/lib/core.sh"
+    t() { printf '%s' "$1"; }
+    local value
+    value="$(my_helper)"
+    [[ "$value" == "expected" ]]
+)
+```
+
+Keep tests non-privileged. Put scratch files under `$TMPDIR_TEST` (removed by
+the `EXIT` trap), and never hardcode a username, UID or real device path.
+
+### Manual smoke tests
+
+These need real hardware and are intentionally **not** part of `make test`:
+
+```bash
+# Print the exact mount and pwsh command without touching the partition
+./ved -b powershell -d /dev/nvme0n1 --dry-run
+
+# Open native PowerShell on the detected Windows partition (read-only)
+./ved -b powershell -d /dev/nvme0n1
+
+# Same with Wine cmd
+./ved -b powershell -p /dev/nvme0n1p3 --shell cmd
+```
+
+In the resulting `PS C:\>` prompt, confirm the environment with
+`$env:HOME` and `(Get-PSReadLineOption).HistorySavePath` as described in
+[Verifying the PowerShell environment](#verifying-the-powershell-environment).
 
 ## Troubleshooting
 
@@ -624,20 +767,23 @@ install ShellCheck locally with `sudo dnf install ShellCheck`; on Debian/Ubuntu 
 - **`The Windows partition is hibernated`** — disable Windows Fast Startup
   (`powercfg /h off` in an elevated Windows prompt) before using
   `--windows-write`. The partition still works read-only.
-- **`PowerShell 7 (pwsh) is not installed`** — `ved` prints distro-specific steps.
-  On Fedora/RHEL:
-
-  ```bash
-  curl -fsSL -O https://packages.microsoft.com/config/rhel/9/packages-microsoft-prod.rpm
-  sudo rpm -i packages-microsoft-prod.rpm
-  sudo dnf install -y powershell
-  ```
-
-  See <https://learn.microsoft.com/powershell/scripting/install/install-rhel>.
-  Alternatively, use `--shell cmd`, which only needs `wine` from the standard
-  repositories.
+- **`PowerShell 7 (pwsh) is not installed`** — see
+  [Installing pwsh](#installing-pwsh). `ved` prints the same distro-specific
+  steps and deliberately never auto-installs it. `--shell cmd` only needs
+  `wine` from the standard repositories.
+- **`The argument '.../ved-profile.ps1' is not recognized as the name of a script file`**
+  — an older `ved` put the generated script in the root-only `/run/ved`
+  directory. Current versions write it to a user-owned `/tmp/ved-shell.XXXXXX`
+  directory; update `ved` if you still see this.
+- **`Oops, something went wrong` / `System.IO.IOException: Permission denied`
+  from PSReadLine** — check `$env:HOME` and
+  `(Get-PSReadLineOption).HistorySavePath` in the prompt. They should show your
+  normal home and a path under `/tmp/ved-shell.XXXXXX`. Current versions pass a
+  clean environment to `runuser` and use a private history file. If you still
+  see `/root`, run `ved -v` and include the `shell environment: user=... home=...`
+  debug line when reporting it.
 - **`Wine cannot run as root`** — run `ved` through `sudo` from your normal user
-  account, or use `--shell pwsh`, which is happy to run as root.
+  account, or use `--shell pwsh`, which can also run directly as root.
 
 ## License
 

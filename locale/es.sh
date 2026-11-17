@@ -45,7 +45,7 @@ Opciones comunes:
   -d, --disk DISPOSITIVO
                         Disco físico, por ejemplo /dev/nvme0n1
   -i, --image ARCHIVO   Archivo de imagen de disco (backend qemu)
-  -p, --partition DISP  Partición raíz de Linux (backend chroot/nspawn)
+  -p, --partition DISP  Partición raíz de Linux (chroot/nspawn) o partición Windows
       --esp DISPOSITIVO Partición EFI (se detecta automáticamente)
       --os TIPO         auto, linux o windows (por defecto: auto)
       --efi-loader RUTA Cargador EFI relativo a la ESP, o vacío para el menú UEFI
@@ -74,6 +74,7 @@ Opciones comunes:
   -c, --command ORDEN   Orden a ejecutar en chroot, nspawn o powershell
       --shell NOMBRE    Backend powershell: pwsh o cmd (por defecto: pwsh)
       --windows-write   Monta la partición Windows en lectura/escritura
+      --windows-ro      Fuerza solo lectura (útil para anular un archivo de configuración)
       --windows-drive L Letra de unidad para la partición en pwsh (por defecto: C)
       --graphical       Comparte pantalla y audio del host con chroot/nspawn
       --boot            Arranca el invitado con systemd-nspawn en vez de una orden
@@ -306,6 +307,7 @@ Otras opciones:
     [shell_cmd]="cmd (capa de compatibilidad Wine, sin VM)"
     [select_shell_prompt]="Opción [1]: "
     [shell_invalid]="Intérprete de Windows no válido: %s"
+    [shell_user_invalid]="No se pudo determinar el directorio personal del usuario: %s"
     [windows_drive_invalid]="Letra de unidad de Windows no válida: %s"
     [windows_no_partition]="No se ha encontrado ninguna partición NTFS o BitLocker en: %s"
     [windows_partitions]="Particiones Windows detectadas:"

@@ -1,4 +1,4 @@
-VED_VERSION="2.0.0"
+VED_VERSION="2.1.0"
 
 VED_BACKEND="${VED_BACKEND:-qemu}"
 VED_BACKEND_SET="${VED_BACKEND_SET:-0}"
@@ -32,6 +32,12 @@ VED_BOOT_MENU="${VED_BOOT_MENU:-1}"
 VED_NETWORK="${VED_NETWORK:-user}"
 VED_USER="${VED_USER:-}"
 VED_COMMAND="${VED_COMMAND:-}"
+VED_SHELL="${VED_SHELL:-pwsh}"
+VED_SHELL_SET="${VED_SHELL_SET:-0}"
+VED_WINDOWS_WRITE="${VED_WINDOWS_WRITE:-0}"
+VED_WINDOWS_DRIVE="${VED_WINDOWS_DRIVE:-C}"
+VED_WINDOWS_MOUNT=""
+VED_WINDOWS_SCRIPT_DIR=""
 VED_GRAPHICAL="${VED_GRAPHICAL:-0}"
 VED_BOOT="${VED_BOOT:-0}"
 VED_SESSION="${VED_SESSION:-auto}"
@@ -282,7 +288,7 @@ ensure_root() {
 
     info "$(t rerun_sudo)"
     exec sudo \
-        --preserve-env=DISPLAY,WAYLAND_DISPLAY,XAUTHORITY,XDG_RUNTIME_DIR,XDG_SESSION_TYPE,DBUS_SESSION_BUS_ADDRESS,VED_LANG,LANG,LC_ALL,LC_MESSAGES,VED_BACKEND,VED_CONFIG,VED_ASSUME_YES,VED_VERBOSE,VED_NO_INSTALL,VED_KEEP_TEMP \
+        --preserve-env=DISPLAY,WAYLAND_DISPLAY,XAUTHORITY,XDG_RUNTIME_DIR,XDG_SESSION_TYPE,DBUS_SESSION_BUS_ADDRESS,VED_LANG,LANG,LC_ALL,LC_MESSAGES,VED_BACKEND,VED_CONFIG,VED_ASSUME_YES,VED_VERBOSE,VED_NO_INSTALL,VED_KEEP_TEMP,VED_SHELL,VED_SHELL_SET,VED_WINDOWS_WRITE,VED_WINDOWS_DRIVE \
         -- "$VED_MAIN" "$@"
 }
 
@@ -628,6 +634,28 @@ parse_cli() {
             --command=*)
                 VED_COMMAND="${arg#--command=}"
                 ;;
+            --shell)
+                VED_SHELL="${2:-}"
+                VED_SHELL_SET=1
+                shift
+                ;;
+            --shell=*)
+                VED_SHELL="${arg#--shell=}"
+                VED_SHELL_SET=1
+                ;;
+            --windows-write)
+                VED_WINDOWS_WRITE=1
+                ;;
+            --windows-ro)
+                VED_WINDOWS_WRITE=0
+                ;;
+            --windows-drive)
+                VED_WINDOWS_DRIVE="${2:-}"
+                shift
+                ;;
+            --windows-drive=*)
+                VED_WINDOWS_DRIVE="${arg#--windows-drive=}"
+                ;;
             --graphical)
                 VED_GRAPHICAL=1
                 ;;
@@ -712,8 +740,20 @@ parse_cli() {
 
     case "${VED_BACKEND,,}" in
         qemu|chroot|nspawn) VED_BACKEND="${VED_BACKEND,,}" ;;
+        powershell|pwsh|windows) VED_BACKEND="powershell" ;;
         *) die "$(t backend_invalid "$VED_BACKEND")" ;;
     esac
+
+    case "${VED_SHELL,,}" in
+        pwsh|powershell) VED_SHELL="pwsh" ;;
+        cmd) VED_SHELL="cmd" ;;
+        *) die "$(t shell_invalid "$VED_SHELL")" ;;
+    esac
+
+    if [[ ! "$VED_WINDOWS_DRIVE" =~ ^[A-Za-z]$ ]]; then
+        die "$(t windows_drive_invalid "$VED_WINDOWS_DRIVE")"
+    fi
+    VED_WINDOWS_DRIVE="${VED_WINDOWS_DRIVE^^}"
 
     case "${VED_GUEST_OS,,}" in
         auto|linux|windows) VED_GUEST_OS="${VED_GUEST_OS,,}" ;;
@@ -814,13 +854,18 @@ ved_main() {
         [[ "$VED_ARCH" == "auto" ]] || run_args+=(--arch "$VED_ARCH")
     fi
 
-    if [[ "$VED_BACKEND" != "qemu" && -t 0 ]]; then
+    if [[ "$VED_BACKEND" != "qemu" && "$VED_BACKEND" != "powershell" && -t 0 ]]; then
         select_session
         run_args+=(--session "$VED_SESSION")
         if [[ "$VED_SESSION" == "app" || "$VED_SESSION" == "desktop" ]]; then
             select_gui_target
             run_args+=(--gui "$VED_GUI_TARGET")
         fi
+    fi
+
+    if [[ "$VED_BACKEND" == "powershell" && "$VED_SHELL_SET" -eq 0 && -t 0 ]]; then
+        select_shell
+        run_args+=(--shell "$VED_SHELL")
     fi
 
     if [[ "$VED_BACKEND" == "qemu" ]]; then
@@ -840,5 +885,6 @@ ved_main() {
         qemu) backend_qemu ;;
         chroot) backend_chroot ;;
         nspawn) backend_nspawn ;;
+        powershell) backend_powershell ;;
     esac
 }

@@ -85,6 +85,8 @@ package_name() {
         debian:findutils) printf '%s' "findutils" ;;
         debian:systemd_container) printf '%s' "systemd-container" ;;
         debian:swtpm) printf '%s' "swtpm" ;;
+        debian:ntfs_3g) printf '%s' "ntfs-3g" ;;
+        debian:wine) printf '%s' "wine" ;;
 
         fedora:qemu) printf '%s' "qemu-system-x86" ;;
         fedora:qemu_aarch64) printf '%s' "qemu-system-aarch64" ;;
@@ -98,6 +100,8 @@ package_name() {
         fedora:findutils) printf '%s' "findutils" ;;
         fedora:systemd_container) printf '%s' "systemd-container" ;;
         fedora:swtpm) printf '%s' "swtpm" ;;
+        fedora:ntfs_3g) printf '%s' "ntfs-3g" ;;
+        fedora:wine) printf '%s' "wine" ;;
 
         arch:qemu) printf '%s' "qemu-full" ;;
         arch:qemu_aarch64) printf '%s' "qemu-full" ;;
@@ -111,6 +115,8 @@ package_name() {
         arch:findutils) printf '%s' "findutils" ;;
         arch:systemd_container) printf '%s' "systemd" ;;
         arch:swtpm) printf '%s' "swtpm" ;;
+        arch:ntfs_3g) printf '%s' "ntfs-3g" ;;
+        arch:wine) printf '%s' "wine" ;;
 
         suse:qemu) printf '%s' "qemu-x86" ;;
         suse:qemu_aarch64) printf '%s' "qemu-arm" ;;
@@ -124,6 +130,8 @@ package_name() {
         suse:findutils) printf '%s' "findutils" ;;
         suse:systemd_container) printf '%s' "systemd-container" ;;
         suse:swtpm) printf '%s' "swtpm" ;;
+        suse:ntfs_3g) printf '%s' "ntfs-3g" ;;
+        suse:wine) printf '%s' "wine" ;;
 
         alpine:qemu) printf '%s' "qemu-system-x86_64" ;;
         alpine:qemu_aarch64) printf '%s' "qemu-system-aarch64" ;;
@@ -137,6 +145,8 @@ package_name() {
         alpine:findutils) printf '%s' "findutils" ;;
         alpine:systemd_container) printf '%s' "" ;;
         alpine:swtpm) printf '%s' "swtpm" ;;
+        alpine:ntfs_3g) printf '%s' "ntfs-3g" ;;
+        alpine:wine) printf '%s' "wine" ;;
 
         void:qemu) printf '%s' "qemu" ;;
         void:qemu_aarch64) printf '%s' "qemu" ;;
@@ -150,6 +160,8 @@ package_name() {
         void:findutils) printf '%s' "findutils" ;;
         void:systemd_container) printf '%s' "" ;;
         void:swtpm) printf '%s' "swtpm" ;;
+        void:ntfs_3g) printf '%s' "ntfs-3g" ;;
+        void:wine) printf '%s' "wine" ;;
 
         *) printf '%s' "" ;;
     esac
@@ -171,6 +183,9 @@ logical_present() {
         findutils) have find ;;
         systemd_container) have systemd-nspawn ;;
         swtpm) have swtpm ;;
+        pwsh) have pwsh || have powershell ;;
+        ntfs_3g) have mount.ntfs || grep -qw ntfs3 /proc/filesystems 2>/dev/null ;;
+        wine) have wine && have wineboot ;;
         *) return 1 ;;
     esac
 }
@@ -233,6 +248,15 @@ ensure_dependencies() {
             required=(systemd_container util_linux coreutils findutils)
             optional=(dosfstools xephyr)
             ;;
+        powershell)
+            # pwsh is intentionally NOT auto-installed: most distributions
+            # (Fedora included) do not ship it in their default repositories.
+            # The backend detects it and prints distribution-specific steps.
+            required=(util_linux coreutils findutils ntfs_3g)
+            if [[ "$VED_SHELL" == "cmd" ]]; then
+                required+=(wine)
+            fi
+            ;;
     esac
 
     for logical in "${required[@]}"; do
@@ -282,4 +306,67 @@ ensure_dependencies() {
     done
 
     info "$(t dependencies_ready)"
+}
+
+# PowerShell is not available in the default repositories of most distributions
+# (notably Fedora/RHEL). ved never tries to install it automatically: it prints
+# these instructions instead, so a failed dnf transaction cannot abort the run.
+powershell_install_hint() {
+    case "${VED_PKG_FAMILY:-unknown}" in
+        fedora)
+            cat <<'EOF'
+PowerShell is not in Fedora's default repositories. Add Microsoft's repository
+once, then install it:
+
+  curl -fsSL -O https://packages.microsoft.com/config/rhel/9/packages-microsoft-prod.rpm
+  sudo rpm -i packages-microsoft-prod.rpm
+  sudo dnf install -y powershell
+
+Or use the already-available Wine shell instead:  --shell cmd
+Details: https://learn.microsoft.com/powershell/scripting/install/install-rhel
+EOF
+            ;;
+        debian)
+            cat <<'EOF'
+PowerShell is usually not in the default apt repositories. Add Microsoft's
+repository once, then install it (Debian 12 example):
+
+  wget -q https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb
+  sudo dpkg -i packages-microsoft-prod.deb
+  sudo apt-get update
+  sudo apt-get install -y powershell
+
+Or use the Wine shell instead:  --shell cmd
+Details: https://learn.microsoft.com/powershell/scripting/install/install-debian
+EOF
+            ;;
+        arch)
+            cat <<'EOF'
+PowerShell 7 is in the AUR as 'powershell-bin' (for example with yay):
+
+  yay -S powershell-bin
+
+Or use the Wine shell instead:  --shell cmd
+EOF
+            ;;
+        suse)
+            cat <<'EOF'
+Add Microsoft's repository, then install PowerShell:
+
+  sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
+  sudo zypper addrepo https://packages.microsoft.com/config/sles/15/prod.repo
+  sudo zypper install powershell
+
+Or use the Wine shell instead:  --shell cmd
+EOF
+            ;;
+        *)
+            cat <<'EOF'
+Install PowerShell 7 ('pwsh') from your distribution or from:
+  https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-linux
+
+Or use the Wine shell instead:  --shell cmd
+EOF
+            ;;
+    esac
 }

@@ -37,9 +37,10 @@ Backends:
   qemu                  Arranca un disco físico, partición o imagen en QEMU/KVM
   chroot                Monta un Linux instalado y entra con chroot
   nspawn                Monta un Linux instalado y lo ejecuta con systemd-nspawn
+  powershell            Monta una partición Windows y abre pwsh o cmd (sin VM)
 
 Opciones comunes:
-  -b, --backend NOMBRE  qemu, chroot o nspawn (por defecto: qemu)
+  -b, --backend NOMBRE  qemu, chroot, nspawn o powershell (por defecto: qemu)
   -L, --lang CÓDIGO     Código de idioma: en, es (por defecto: el del entorno)
   -d, --disk DISPOSITIVO
                         Disco físico, por ejemplo /dev/nvme0n1
@@ -70,7 +71,10 @@ Opciones comunes:
       --render-node DISP
                         Fuerza un nodo de render DRM, por ejemplo /dev/dri/renderD128
       --user NOMBRE     Usuario a usar dentro de chroot o nspawn
-  -c, --command ORDEN   Orden a ejecutar en chroot o nspawn
+  -c, --command ORDEN   Orden a ejecutar en chroot, nspawn o powershell
+      --shell NOMBRE    Backend powershell: pwsh o cmd (por defecto: pwsh)
+      --windows-write   Monta la partición Windows en lectura/escritura
+      --windows-drive L Letra de unidad para la partición en pwsh (por defecto: C)
       --graphical       Comparte pantalla y audio del host con chroot/nspawn
       --boot            Arranca el invitado con systemd-nspawn en vez de una orden
       --session MODE    chroot/nspawn: shell, app, desktop o system (por defecto: preguntar)
@@ -95,6 +99,7 @@ Otras opciones:
     [backend_qemu]="Arrancarlo como máquina virtual (QEMU/KVM)"
     [backend_chroot]="Entrar en un sistema Linux instalado (chroot)"
     [backend_nspawn]="Ejecutar un sistema Linux instalado como contenedor (systemd-nspawn)"
+    [backend_powershell]="Abrir PowerShell o cmd en una partición Windows (sin VM)"
     [select_session]="¿Qué quieres lanzar dentro del sistema?"
     [session_shell]="Un intérprete de órdenes interactivo"
     [session_app]="Una sola aplicación gráfica"
@@ -296,4 +301,37 @@ Otras opciones:
     [nspawn_status_hint]=" Ctrl+A luego: [S]Detener  [R]Reiniciar  [P]Apagar  [Q]Salir ved "
     [nspawn_status_hint_cmd]=" Modo comando: [S]Detener  [R]Reiniciar  [P]Apagar  [Q]Salir  [Esc] cancelar "
     [nspawn_status_machine]=" Máquina: %s  PID: %s "
+    [select_shell]="¿Qué intérprete de Windows desea?"
+    [shell_pwsh]="PowerShell 7 (pwsh nativo, sin VM)"
+    [shell_cmd]="cmd (capa de compatibilidad Wine, sin VM)"
+    [select_shell_prompt]="Opción [1]: "
+    [shell_invalid]="Intérprete de Windows no válido: %s"
+    [windows_drive_invalid]="Letra de unidad de Windows no válida: %s"
+    [windows_no_partition]="No se ha encontrado ninguna partición NTFS o BitLocker en: %s"
+    [windows_partitions]="Particiones Windows detectadas:"
+    [windows_select_partition]="¿Qué partición Windows desea usar? [1]: "
+    [windows_selected_partition]="Partición Windows seleccionada:"
+    [windows_mounting]="Montando la partición Windows..."
+    [windows_ready]="Partición Windows lista en: %s"
+    [windows_mount_failed]="No se pudo montar la partición Windows: %s"
+    [windows_temp_failed]="No se pudo preparar el directorio temporal del intérprete de Windows: %s"
+    [windows_bitlocker]="La partición %s está cifrada con BitLocker. Descífrela primero (por ejemplo con dislocker) y pase el dispositivo descifrado con --partition."
+    [windows_ntfs_missing]="No hay soporte para ntfs-3g ni para ntfs3 del núcleo. Instale ntfs-3g."
+    [windows_hibernated]="La partición Windows está hibernada (Inicio rápido activado). Desactive el Inicio rápido en Windows o deje la partición en solo lectura."
+    [windows_writable_warning]="ADVERTENCIA: los cambios se escribirán directamente en la partición Windows."
+    [windows_write_existing_mount]="La partición ya está montada; no se pueden cambiar las opciones de lectura/escritura. Se usará el montaje existente."
+    [windows_using_existing_mount]="Usando el punto de montaje existente: %s"
+    [windows_rw_value]="lectura/escritura"
+    [windows_ro_value]="solo lectura"
+    [windows_drive_label]="Unidad Windows: %s"
+    [windows_access_label]="Acceso: %s"
+    [shell_label]="Intérprete: %s"
+    [powershell_missing]="PowerShell 7 (pwsh) no está instalado."
+    [powershell_profile]="Asignando la unidad %s: a la partición Windows."
+    [powershell_shell]="Abriendo un intérprete interactivo de PowerShell."
+    [powershell_command]="Ejecutando comando de PowerShell: %s"
+    [wine_needs_user]="Wine no puede ejecutarse como root. Ejecute ved con sudo desde su usuario normal para usar el intérprete cmd."
+    [wine_prefix_failed]="No se pudo inicializar el prefijo de Wine; es posible que cmd no arranque."
+    [cmd_shell]="Abriendo un intérprete cmd interactivo (Wine). La partición Windows es la unidad W:."
+    [cmd_command]="Ejecutando comando cmd: %s"
 )

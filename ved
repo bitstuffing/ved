@@ -33,5 +33,7 @@ source "$VED_ROOT/lib/backends/qemu.sh"
 source "$VED_ROOT/lib/backends/chroot.sh"
 # shellcheck source=lib/backends/nspawn.sh
 source "$VED_ROOT/lib/backends/nspawn.sh"
+# shellcheck source=lib/backends/powershell.sh
+source "$VED_ROOT/lib/backends/powershell.sh"
 
 ved_main "$@"

@@ -167,6 +167,98 @@ detect_root_partition() {
     printf '  %s\n' "$VED_ROOT_PARTITION"
 }
 
+windows_mount_type() {
+    if have ntfs-3g || have mount.ntfs; then
+        printf 'ntfs'
+    elif grep -qw ntfs3 /proc/filesystems 2>/dev/null; then
+        printf 'ntfs3'
+    else
+        return 1
+    fi
+}
+
+windows_partition_candidates() {
+    local part fstype label
+    while read -r part fstype label; do
+        [[ -n "$part" ]] || continue
+        case "${fstype,,}" in
+            ntfs|ntfs3|bitlocker|*bitlocker*) printf '%s\n' "$part" ;;
+            '')
+                case "${label,,}" in
+                    *windows*|*os*|*system*) printf '%s\n' "$part" ;;
+                esac
+                ;;
+        esac
+    done < <(lsblk -nrpo NAME,FSTYPE,LABEL "$VED_DISK" 2>/dev/null)
+}
+
+detect_windows_partition() {
+    local -a candidates=() viable=()
+    local part part_info option index mount_type
+    local probe_dir="$VED_VM_DIR/windows-probe"
+
+    if [[ -n "$VED_ROOT_PARTITION" ]]; then
+        [[ -b "$VED_ROOT_PARTITION" ]] ||
+            die "$(t partition_missing "$VED_ROOT_PARTITION")"
+        return
+    fi
+
+    [[ -n "$VED_DISK" ]] || die "$(t no_disks)"
+
+    mapfile -t candidates < <(windows_partition_candidates)
+    ((${#candidates[@]} > 0)) || die "$(t windows_no_partition "$VED_DISK")"
+
+    mount_type="$(windows_mount_type || true)"
+
+    if [[ -n "$mount_type" ]]; then
+        mkdir -p "$probe_dir"
+        cleanup_add_dir "$probe_dir"
+        for part in "${candidates[@]}"; do
+            umount_path "$probe_dir"
+            if mount -t "$mount_type" -o ro "$part" "$probe_dir" 2>/dev/null; then
+                if [[ -d "$probe_dir/Windows/System32" ||
+                    -d "$probe_dir/windows/system32" ]]; then
+                    viable+=("$part")
+                fi
+                umount "$probe_dir" 2>/dev/null || true
+            fi
+        done
+    fi
+
+    ((${#viable[@]} > 0)) || viable=("${candidates[@]}")
+
+    if ((${#viable[@]} == 1)); then
+        VED_ROOT_PARTITION="${viable[0]}"
+        return
+    fi
+
+    echo
+    info "$(t windows_partitions)"
+    echo
+
+    for index in "${!viable[@]}"; do
+        part="${viable[$index]}"
+        part_info="$(lsblk -dnpo SIZE,FSTYPE,LABEL "$part" 2>/dev/null | tr -s ' ' || true)"
+        printf '  %d) %s - %s\n' "$((index + 1))" "$part" "$part_info"
+    done
+
+    echo
+
+    while true; do
+        option="$(ask "$(t windows_select_partition)" "1")"
+        if [[ "$option" =~ ^[0-9]+$ ]] &&
+            ((option >= 1 && option <= ${#viable[@]})); then
+            VED_ROOT_PARTITION="${viable[$((option - 1))]}"
+            break
+        fi
+        warn "$(t invalid_selection)"
+    done
+
+    echo
+    info "$(t windows_selected_partition)"
+    printf '  %s\n' "$VED_ROOT_PARTITION"
+}
+
 assert_unmounted() {
     local device="$1"
     local mounted

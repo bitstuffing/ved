@@ -37,9 +37,10 @@ Backends:
   qemu                  Run a physical disk, partition or disk image in QEMU/KVM
   chroot                Mount an installed Linux system and enter it with chroot
   nspawn                Mount an installed Linux system and run it with systemd-nspawn
+  powershell            Mount a Windows partition and open pwsh or cmd (no VM)
 
 Common options:
-  -b, --backend NAME    qemu, chroot or nspawn (default: qemu)
+  -b, --backend NAME    qemu, chroot, nspawn or powershell (default: qemu)
   -L, --lang CODE       Language code: en, es (default: from the environment)
   -d, --disk DEVICE     Physical disk, for example /dev/nvme0n1
   -i, --image FILE      Disk image file (QEMU backend)
@@ -68,7 +69,10 @@ Common options:
       --no-gl           Disable OpenGL acceleration
       --render-node DEV Force a DRM render node, for example /dev/dri/renderD128
       --user NAME       User to use inside a chroot or nspawn container
-  -c, --command CMD     Command to run in the chroot or nspawn backend
+  -c, --command CMD     Command to run in the chroot, nspawn or powershell backend
+      --shell NAME      powershell backend: pwsh or cmd (default: pwsh)
+      --windows-write   Mount the Windows partition read-write (default: read-only)
+      --windows-drive L Drive letter for the partition in pwsh (default: C)
       --graphical       Bind the host display and audio into chroot/nspawn
       --boot            Boot the guest with systemd-nspawn instead of a command
       --session MODE    chroot/nspawn: shell, app, desktop or system (default: ask)
@@ -93,6 +97,7 @@ Other options:
     [backend_qemu]="Start it as a virtual machine (QEMU/KVM)"
     [backend_chroot]="Enter an installed Linux system (chroot)"
     [backend_nspawn]="Run an installed Linux system as a container (systemd-nspawn)"
+    [backend_powershell]="Open PowerShell or cmd on a Windows partition (no VM)"
     [select_session]="What do you want to launch inside the system?"
     [session_shell]="An interactive shell"
     [session_app]="A single graphical application"
@@ -294,4 +299,37 @@ Other options:
     [nspawn_status_hint]=" Ctrl+A then: [S]top  [R]eboot  [P]oweroff  [Q]uit ved "
     [nspawn_status_hint_cmd]=" Command mode: [S]top  [R]eboot  [P]oweroff  [Q]uit  [Esc] cancel "
     [nspawn_status_machine]=" Machine: %s  PID: %s "
+    [select_shell]="Which Windows shell do you want?"
+    [shell_pwsh]="PowerShell 7 (native pwsh, no VM)"
+    [shell_cmd]="cmd (Wine compatibility layer, no VM)"
+    [select_shell_prompt]="Option [1]: "
+    [shell_invalid]="Invalid Windows shell: %s"
+    [windows_drive_invalid]="Invalid Windows drive letter: %s"
+    [windows_no_partition]="No NTFS or BitLocker partition was found on: %s"
+    [windows_partitions]="Detected Windows partitions:"
+    [windows_select_partition]="Which Windows partition do you want to use? [1]: "
+    [windows_selected_partition]="Selected Windows partition:"
+    [windows_mounting]="Mounting the Windows partition..."
+    [windows_ready]="Windows partition ready at: %s"
+    [windows_mount_failed]="Could not mount the Windows partition: %s"
+    [windows_temp_failed]="Could not prepare the temporary Windows shell directory: %s"
+    [windows_bitlocker]="Partition %s is BitLocker-encrypted. Unlock it first (for example with dislocker) and pass the unlocked device with --partition."
+    [windows_ntfs_missing]="Neither ntfs-3g nor kernel ntfs3 support is available. Install ntfs-3g."
+    [windows_hibernated]="The Windows partition is hibernated (Fast Startup is enabled). Disable Fast Startup in Windows, or leave the partition read-only."
+    [windows_writable_warning]="WARNING: changes will be written directly to the Windows partition."
+    [windows_write_existing_mount]="The partition is already mounted; read-write settings cannot be changed. Using the existing mount."
+    [windows_using_existing_mount]="Using the existing mount point: %s"
+    [windows_rw_value]="read-write"
+    [windows_ro_value]="read-only"
+    [windows_drive_label]="Windows drive: %s"
+    [windows_access_label]="Access: %s"
+    [shell_label]="Shell: %s"
+    [powershell_missing]="PowerShell 7 (pwsh) is not installed."
+    [powershell_profile]="Mapping drive %s: to the Windows partition."
+    [powershell_shell]="Opening an interactive PowerShell prompt."
+    [powershell_command]="Running PowerShell command: %s"
+    [wine_needs_user]="Wine cannot run as root. Run ved with sudo from your normal user account to use the cmd shell."
+    [wine_prefix_failed]="The Wine prefix could not be initialized; cmd may not start."
+    [cmd_shell]="Opening an interactive cmd prompt (Wine). The Windows partition is drive W:."
+    [cmd_command]="Running cmd command: %s"
 )

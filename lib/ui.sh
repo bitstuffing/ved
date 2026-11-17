@@ -53,6 +53,7 @@ select_backend() {
     printf '  1) %s\n' "$(t backend_qemu)"
     printf '  2) %s\n' "$(t backend_chroot)"
     printf '  3) %s\n' "$(t backend_nspawn)"
+    printf '  4) %s\n' "$(t backend_powershell)"
     echo
 
     option="$(ask "$(t select_backend_prompt)" "1")"
@@ -60,9 +61,28 @@ select_backend() {
         1) VED_BACKEND="qemu" ;;
         2) VED_BACKEND="chroot" ;;
         3) VED_BACKEND="nspawn" ;;
+        4) VED_BACKEND="powershell" ;;
         *) die "$(t invalid_option)" ;;
     esac
     VED_BACKEND_SET=1
+}
+
+select_shell() {
+    local option
+
+    echo
+    info "$(t select_shell)"
+    printf '  1) %s\n' "$(t shell_pwsh)"
+    printf '  2) %s\n' "$(t shell_cmd)"
+    echo
+
+    option="$(ask "$(t select_shell_prompt)" "1")"
+    case "$option" in
+        1) VED_SHELL="pwsh" ;;
+        2) VED_SHELL="cmd" ;;
+        *) die "$(t invalid_option)" ;;
+    esac
+    VED_SHELL_SET=1
 }
 
 accel_text() {
@@ -240,6 +260,15 @@ show_configuration() {
     echo
     info "$(t configuration)"
     msg backend_label "$VED_BACKEND"
+    if [[ "$VED_BACKEND" == "powershell" ]]; then
+        msg shell_label "$(t "shell_$VED_SHELL")"
+        msg windows_drive_label "${VED_WINDOWS_DRIVE}:"
+        if [[ "$VED_WINDOWS_WRITE" -eq 1 ]]; then
+            msg windows_access_label "$(t windows_rw_value)"
+        else
+            msg windows_access_label "$(t windows_ro_value)"
+        fi
+    fi
     if [[ -n "$VED_IMAGE" ]]; then
         msg image_label "$VED_IMAGE"
     fi

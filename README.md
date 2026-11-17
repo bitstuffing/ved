@@ -1,9 +1,9 @@
 # ved — Virtual External Devices
 
-**Boot a physical disk, a partition or a disk image as a virtual machine, or enter an installed Linux system as a chroot / container — from one command.**
+**Boot a physical disk, a partition or a disk image as a virtual machine, enter an installed Linux system as a chroot / container, or open a PowerShell / cmd prompt on a Windows partition — from one command.**
 
-`ved` is a single, modular Bash tool that wraps QEMU/KVM, `chroot` and `systemd-nspawn`
-behind a friendly, interactive menu. It auto-detects your disks, EFI loaders, GPUs,
+`ved` is a single, modular Bash tool that wraps QEMU/KVM, `chroot`, `systemd-nspawn`
+and `pwsh`/Wine behind a friendly, interactive menu. It auto-detects your disks, EFI loaders, GPUs,
 TPM and USB devices, installs missing packages for your distribution, and asks for
 the administrator password only once.
 
@@ -17,6 +17,7 @@ the administrator password only once.
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Backends](#backends)
+- [PowerShell / cmd on a Windows partition (no VM)](#powershell--cmd-on-a-windows-partition-no-vm)
 - [Interactive flow](#interactive-flow)
 - [USB devices (webcam, Bluetooth/AirPods, phones)](#usb-devices-webcam-bluetoothairpods-phones)
 - [Display and OpenGL](#display-and-opengl)
@@ -38,7 +39,9 @@ the administrator password only once.
 - **One entry point**: `./ved`. Run it with no arguments for an interactive menu.
 - **Physical disks, partitions or images**: pass a whole disk (`--disk`), a Linux root
   partition (`--partition`) or a disk image (`--image`).
-- **Three backends**: QEMU/KVM, `chroot`, and `systemd-nspawn`.
+- **Four backends**: QEMU/KVM, `chroot`, `systemd-nspawn`, and a Windows shell
+  backend that mounts an NTFS partition and opens **PowerShell 7 (`pwsh`)** or
+  **cmd (via Wine)** — with no QEMU process at all.
 - **Automatic detection** of disks, EFI system partitions, EFI loaders, guest OS,
   DRM render nodes, hardware TPM and USB devices.
 - **OpenGL acceleration** through `virtio-vga-gl` and a selected DRM render node,
@@ -61,6 +64,9 @@ the administrator password only once.
 - **nspawn status bar** (Ctrl+A prefix): when booting a full system with `--boot`,
   a persistent status bar shows machine name/PID and lets you Stop/Reboot/Poweroff/Quit
   without leaving the terminal.
+- **Windows partition shell**: mounts the NTFS/BitLocker-unlocked partition read-only
+  by default, maps it to a `C:` PSDrive in PowerShell (or `W:` in Wine cmd), and
+  detects already-mounted partitions so it can reuse them.
 
 ## Requirements
 
@@ -81,6 +87,9 @@ dependencies are:
 | SPICE viewer (optional) | `virt-viewer` (`remote-viewer`, `virt-viewer`, `spicy`) |
 | Software TPM (optional) | `swtpm` |
 | Containers (nspawn backend) | `systemd-container` |
+| Windows shell (powershell backend) | `pwsh` (PowerShell 7) — **not auto-installed**, see below |
+| NTFS access (powershell backend) | `ntfs-3g` (or kernel `ntfs3` support) |
+| cmd shell (optional) | `wine` |
 | Nested X11 (optional) | `Xephyr` (only for guests that still support X11 sessions) |
 
 **Requirements inside the installed (guest) system** for a full graphical desktop:
@@ -126,7 +135,7 @@ Run it with no options — the interactive menu guides you through everything:
 The tool will:
 
 1. scan and list your physical disks, and ask which one to use;
-2. ask what to do with it (virtual machine, chroot or container);
+2. ask what to do with it (virtual machine, chroot, container or Windows shell);
 3. ask for the administrator password (once);
 4. mount the system, inspect it and detect the EFI loader, guest OS, desktop,
    memory, CPUs and storage mode;
@@ -139,8 +148,80 @@ The tool will:
 | **QEMU/KVM** | `-b qemu` | Runs a physical disk, a partition or an image as a full virtual machine (UEFI + SPICE). |
 | **chroot** | `-b chroot` | Mounts an installed Linux system and enters it with `chroot`. Can bind the host display/audio with `--graphical`. |
 | **systemd-nspawn** | `-b nspawn` | Mounts an installed Linux system and runs it as a container; `--boot` boots it with systemd. |
+| **Windows shell** | `-b powershell` (aliases: `pwsh`, `windows`) | Mounts a Windows partition and opens native PowerShell 7 (`--shell pwsh`) or Wine cmd (`--shell cmd`). No QEMU, no graphics stack. |
 
 > **Security:** `chroot` is not a security boundary. It runs with host privileges and exposes host kernel interfaces to the installed system. Use it only with installations you trust; use QEMU for untrusted disks or images.
+
+## PowerShell / cmd on a Windows partition (no VM)
+
+This backend answers a common question: *"can I use a Windows partition like a
+chroot, just to get a `cmd` or PowerShell prompt without booting a whole VM?"*
+
+**A literal Windows chroot is not possible.** `chroot` and `systemd-nspawn` share
+the host's Linux kernel; Windows executables need the Windows NT kernel. There is
+no way to run the partition's own `C:\Windows\System32\cmd.exe` or
+`powershell.exe` on a Linux kernel. What `ved` can do instead is mount the
+partition and run a **Windows-compatible shell around it**. Two modes are
+available, and neither starts QEMU:
+
+| Mode | Command | What it is | What you get |
+| --- | --- | --- | --- |
+| `pwsh` (default) | `pwsh -NoProfile` | Microsoft's **native Linux PowerShell 7** | A real PowerShell prompt. `ved` injects a small startup script that creates a `C:` PSDrive pointing at the mount and moves you there, so the prompt reads `PS C:\>`. |
+| `cmd` | `wine cmd.exe` | **Wine's** `cmd.exe` reimplementation | A familiar `cmd` prompt. The Windows partition is exposed as `W:` (Wine keeps its own `C:` intact). Requires `wine`. |
+
+```bash
+# PowerShell 7 on the detected Windows partition of a disk
+./ved -b powershell -d /dev/nvme0n1
+
+# Explicit partition, PowerShell, read-write
+./ved -b powershell -p /dev/nvme0n1p3 --windows-write
+
+# Wine cmd instead of PowerShell
+./ved -b powershell -p /dev/nvme0n1p3 --shell cmd
+
+# One-shot command (no interactive prompt)
+./ved -b powershell -p /dev/nvme0n1p3 -c 'Get-ChildItem C:\Windows | Select-Object -First 5'
+
+# Inspect the mount and shell commands without running them
+./ved -b powershell -p /dev/nvme0n1p3 --shell cmd --dry-run
+```
+
+### What the backend does
+
+1. **Finds the partition.** If `--partition` is not given, it scans the selected
+   disk for NTFS/BitLocker partitions and probes them read-only for
+   `Windows\System32` to identify the actual system partition. If several look
+   plausible, you are asked to choose.
+2. **Mounts it safely.** The default is **read-only** (`-o ro,nosuid,nodev`).
+   Use `--windows-write` for read-write; `ved` refuses if `hiberfil.sys` exists
+   (Windows Fast Startup), because writing to a hibernated NTFS volume corrupts it.
+   If the partition is already mounted by your desktop, `ved` reuses that mount
+   point instead of mounting it twice.
+3. **Creates a private startup script** in the temporary run directory. It never
+   touches your real PowerShell profile. It maps the mount to the drive letter
+   chosen with `--windows-drive` (default `C`).
+4. **Drops privileges for the shell.** When invoked through `sudo`, `pwsh` (and
+   Wine, which refuses to run as root) is started as your original user via
+   `runuser`, with the mount owned by that UID/GID.
+
+### Limitations — please read
+
+- This is **not** your installed Windows. Its own `System32\cmd.exe`,
+  `powershell.exe`, drivers, services and registry are not used. `pwsh` is the
+  cross-platform PowerShell 7 runtime, and `cmd` is Wine's implementation.
+- Windows PowerShell **5.1** cannot run under Wine; use PowerShell 7 (`pwsh`) or
+  Wine's `cmd` instead.
+- Read-only is the default on purpose. Most inspection and repair tasks work
+  fine read-only; enable `--windows-write` only when you know the volume is not
+  hibernated and you really want to change files.
+- **BitLocker**: encrypted partitions must be unlocked first (for example with
+  `dislocker`), then pass the unlocked device with `--partition`.
+- `wine` cannot run as root. If you start `ved` as root directly (not through
+  `sudo`), use `--shell pwsh`; the `cmd` mode will explain what to do.
+- **`pwsh` is never installed automatically.** Fedora/RHEL do not ship PowerShell
+  in their default repositories, so `ved` detects it and prints the steps below
+  instead of letting `dnf install powershell` fail. Wine `cmd` works with packages
+  from the standard repositories.
 
 ## Interactive flow
 
@@ -153,6 +234,12 @@ What do you want to do?
   1) Start it as a virtual machine (QEMU/KVM)
   2) Enter an installed Linux system (chroot)
   3) Run an installed Linux system as a container (systemd-nspawn)
+  4) Open PowerShell or cmd on a Windows partition (no VM)
+Option [1]:
+
+Which Windows shell do you want?
+  1) PowerShell 7 (native pwsh, no VM)
+  2) cmd (Wine compatibility layer, no VM)
 Option [1]:
 
 What do you want to launch inside the system?
@@ -168,8 +255,9 @@ Where should the graphical session be shown?
 Option [1]:
 ```
 
-The last question is skipped automatically when the installed desktop cannot run
-inside Xephyr (see [GNOME 49+](#gnome-49-and-newer)).
+The shell question only appears for the Windows backend; the session/GUI questions
+only appear for chroot/nspawn. The last question is skipped automatically when the
+installed desktop cannot run inside Xephyr (see [GNOME 49+](#gnome-49-and-newer)).
 
 ## USB devices (webcam, Bluetooth/AirPods, phones)
 
@@ -317,7 +405,7 @@ keypresses, and you never need another terminal to manage the container.
 
 ```
 Common options:
-  -b, --backend NAME    qemu, chroot or nspawn (default: qemu)
+  -b, --backend NAME    qemu, chroot, nspawn or powershell (default: qemu)
   -L, --lang CODE       Language code: en, es (default: from the environment)
   -d, --disk DEVICE     Physical disk, for example /dev/nvme0n1
   -i, --image FILE      Disk image file (QEMU backend)
@@ -348,7 +436,10 @@ Common options:
       --no-gl           Disable OpenGL acceleration
       --render-node DEV Force a DRM render node, for example /dev/dri/renderD128
       --user NAME       User to use inside a chroot or nspawn container
-  -c, --command CMD     Command to run in the chroot or nspawn backend
+  -c, --command CMD     Command to run in the chroot, nspawn or powershell backend
+      --shell NAME      powershell backend: pwsh or cmd (default: pwsh)
+      --windows-write   Mount the Windows partition read-write (default: read-only)
+      --windows-drive L Drive letter for the partition in pwsh (default: C)
       --graphical       Bind the host display and audio into chroot/nspawn
       --boot            Boot the guest with systemd-nspawn instead of a command
       --session MODE    shell, app, desktop or system (default: ask)
@@ -417,6 +508,15 @@ Other options:
 
 # Pass a specific USB device and reset the Bluetooth adapter
 ./ved --disk /dev/nvme0n1 --usb 413c:301a --reset-bluetooth 8087:0033
+
+# Open PowerShell 7 on a Windows partition (no QEMU VM)
+./ved --backend powershell --disk /dev/nvme0n1
+
+# Same, but with Wine cmd and an explicit partition
+./ved -b powershell -p /dev/nvme0n1p3 --shell cmd
+
+# Run one PowerShell command against the Windows partition
+./ved -b powershell -p /dev/nvme0n1p3 -c 'Get-ChildItem C:\'
 ```
 
 ## Project layout
@@ -436,6 +536,7 @@ lib/
     qemu.sh             QEMU/KVM backend
     chroot.sh           chroot backend
     nspawn.sh           systemd-nspawn backend
+    powershell.sh       Windows-partition shell backend (pwsh / Wine cmd)
 locale/
   en.sh                 English messages
   es.sh                 Spanish messages
@@ -515,6 +616,28 @@ install ShellCheck locally with `sudo dnf install ShellCheck`; on Debian/Ubuntu 
   instead.
 - **nspawn status bar not appearing** — requires a real TTY (`-t`); it won't show
   in scripts or pipes. Use `--dry-run` to verify the command.
+- **`No NTFS or BitLocker partition was found`** (powershell backend) — pass the
+  partition explicitly with `--partition`, or check that the device is really a
+  Windows disk. BitLocker volumes must be unlocked first (for example with
+  `dislocker`) and the unlocked mapper device passed with `--partition`.
+- **`Neither ntfs-3g nor kernel ntfs3 support is available`** — install `ntfs-3g`.
+- **`The Windows partition is hibernated`** — disable Windows Fast Startup
+  (`powercfg /h off` in an elevated Windows prompt) before using
+  `--windows-write`. The partition still works read-only.
+- **`PowerShell 7 (pwsh) is not installed`** — `ved` prints distro-specific steps.
+  On Fedora/RHEL:
+
+  ```bash
+  curl -fsSL -O https://packages.microsoft.com/config/rhel/9/packages-microsoft-prod.rpm
+  sudo rpm -i packages-microsoft-prod.rpm
+  sudo dnf install -y powershell
+  ```
+
+  See <https://learn.microsoft.com/powershell/scripting/install/install-rhel>.
+  Alternatively, use `--shell cmd`, which only needs `wine` from the standard
+  repositories.
+- **`Wine cannot run as root`** — run `ved` through `sudo` from your normal user
+  account, or use `--shell pwsh`, which is happy to run as root.
 
 ## License
 

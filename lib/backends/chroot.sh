@@ -645,6 +645,8 @@ chroot_run() {
     VED_UTS_NAMESPACE_OK=0
     if [[ -n "$hostname_value" ]] && have unshare && have hostname; then
         VED_UTS_NAMESPACE_OK=1
+        # The quoted script is executed by the inner /bin/sh, not by this shell.
+        # shellcheck disable=SC2016
         uts_command=(
             unshare --uts /bin/sh -c
             'if ! hostname "$1" 2>/dev/null; then printf "%s\n" "$2" >&2; fi; shift 2; exec "$@"'

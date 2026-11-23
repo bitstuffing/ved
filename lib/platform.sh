@@ -87,6 +87,10 @@ package_name() {
         debian:swtpm) printf '%s' "swtpm" ;;
         debian:ntfs_3g) printf '%s' "ntfs-3g" ;;
         debian:wine) printf '%s' "wine" ;;
+        debian:skopeo) printf '%s' "skopeo" ;;
+        debian:python3) printf '%s' "python3" ;;
+        debian:tar) printf '%s' "tar" ;;
+        debian:zstd) printf '%s' "zstd" ;;
 
         fedora:qemu) printf '%s' "qemu-system-x86" ;;
         fedora:qemu_aarch64) printf '%s' "qemu-system-aarch64" ;;
@@ -102,6 +106,10 @@ package_name() {
         fedora:swtpm) printf '%s' "swtpm" ;;
         fedora:ntfs_3g) printf '%s' "ntfs-3g" ;;
         fedora:wine) printf '%s' "wine" ;;
+        fedora:skopeo) printf '%s' "skopeo" ;;
+        fedora:python3) printf '%s' "python3" ;;
+        fedora:tar) printf '%s' "tar" ;;
+        fedora:zstd) printf '%s' "zstd" ;;
 
         arch:qemu) printf '%s' "qemu-full" ;;
         arch:qemu_aarch64) printf '%s' "qemu-full" ;;
@@ -117,6 +125,10 @@ package_name() {
         arch:swtpm) printf '%s' "swtpm" ;;
         arch:ntfs_3g) printf '%s' "ntfs-3g" ;;
         arch:wine) printf '%s' "wine" ;;
+        arch:skopeo) printf '%s' "skopeo" ;;
+        arch:python3) printf '%s' "python3" ;;
+        arch:tar) printf '%s' "tar" ;;
+        arch:zstd) printf '%s' "zstd" ;;
 
         suse:qemu) printf '%s' "qemu-x86" ;;
         suse:qemu_aarch64) printf '%s' "qemu-arm" ;;
@@ -132,6 +144,10 @@ package_name() {
         suse:swtpm) printf '%s' "swtpm" ;;
         suse:ntfs_3g) printf '%s' "ntfs-3g" ;;
         suse:wine) printf '%s' "wine" ;;
+        suse:skopeo) printf '%s' "skopeo" ;;
+        suse:python3) printf '%s' "python3" ;;
+        suse:tar) printf '%s' "tar" ;;
+        suse:zstd) printf '%s' "zstd" ;;
 
         alpine:qemu) printf '%s' "qemu-system-x86_64" ;;
         alpine:qemu_aarch64) printf '%s' "qemu-system-aarch64" ;;
@@ -147,6 +163,10 @@ package_name() {
         alpine:swtpm) printf '%s' "swtpm" ;;
         alpine:ntfs_3g) printf '%s' "ntfs-3g" ;;
         alpine:wine) printf '%s' "wine" ;;
+        alpine:skopeo) printf '%s' "skopeo" ;;
+        alpine:python3) printf '%s' "python3" ;;
+        alpine:tar) printf '%s' "tar" ;;
+        alpine:zstd) printf '%s' "zstd" ;;
 
         void:qemu) printf '%s' "qemu" ;;
         void:qemu_aarch64) printf '%s' "qemu" ;;
@@ -162,6 +182,10 @@ package_name() {
         void:swtpm) printf '%s' "swtpm" ;;
         void:ntfs_3g) printf '%s' "ntfs-3g" ;;
         void:wine) printf '%s' "wine" ;;
+        void:skopeo) printf '%s' "skopeo" ;;
+        void:python3) printf '%s' "python3" ;;
+        void:tar) printf '%s' "tar" ;;
+        void:zstd) printf '%s' "zstd" ;;
 
         *) printf '%s' "" ;;
     esac
@@ -182,6 +206,10 @@ logical_present() {
         coreutils) have truncate && have mktemp && have nproc && have chroot ;;
         findutils) have find ;;
         systemd_container) have systemd-nspawn ;;
+        skopeo) have skopeo ;;
+        python3) have python3 ;;
+        tar) have tar ;;
+        zstd) have zstd ;;
         swtpm) have swtpm ;;
         pwsh) have pwsh || have powershell ;;
         ntfs_3g) have mount.ntfs || grep -qw ntfs3 /proc/filesystems 2>/dev/null ;;
@@ -247,6 +275,10 @@ ensure_dependencies() {
         nspawn)
             required=(systemd_container util_linux coreutils findutils)
             optional=(dosfstools xephyr)
+            ;;
+        docker)
+            required=(skopeo tar util_linux coreutils findutils)
+            optional=(python3 zstd xephyr)
             ;;
         powershell)
             # pwsh is intentionally NOT auto-installed: most distributions

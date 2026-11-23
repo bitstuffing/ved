@@ -15,6 +15,18 @@ VED_SHOW_VERSION=0
 VED_DISK="${VED_DISK:-}"
 VED_IMAGE="${VED_IMAGE:-}"
 VED_ROOT_PARTITION="${VED_ROOT_PARTITION:-}"
+VED_DOCKER_STORAGE="${VED_DOCKER_STORAGE:-}"
+VED_DOCKER_RESET="${VED_DOCKER_RESET:-0}"
+VED_DOCKER_LIST="${VED_DOCKER_LIST:-0}"
+VED_DOCKER_PRUNE="${VED_DOCKER_PRUNE:-0}"
+VED_DOCKER_IMAGE_REF=""
+VED_DOCKER_ROOTFS=""
+VED_DOCKER_ENV=()
+VED_DOCKER_ENTRYPOINT=()
+VED_DOCKER_CMD=()
+VED_DOCKER_WORKDIR=""
+VED_DOCKER_ARCH=""
+VED_DOCKER_OS=""
 VED_ESP="${VED_ESP:-}"
 VED_GUEST_OS="${VED_GUEST_OS:-auto}"
 VED_EFI_LOADER="${VED_EFI_LOADER:-}"
@@ -93,6 +105,9 @@ VED_GUEST_SYSTEM_BUS_ADDRESS=""
 VED_GUEST_SYSTEM_BUS_PID=""
 VED_GUEST_LOGIN1_STUB_PID=""
 VED_NSPAWN_GUEST_BUS_DIR=""
+VED_GUEST_IMAGE_ENV=()
+VED_CHROOT_WORKDIR=""
+VED_CHROOT_DISABLE_UTS=0
 VED_UTS_NAMESPACE_OK=0
 
 VED_OVMF_CODE=""
@@ -224,6 +239,13 @@ quote_arg() {
     fi
 }
 
+# POSIX sh quoting for commands executed inside a guest. Unlike printf %q this
+# never emits Bash-only $'...' syntax, so it is safe with chroot's /bin/sh.
+shell_quote_posix() {
+    local value="$1"
+    printf "'%s'" "${value//\'/\'\\\'\'}"
+}
+
 print_command() {
     local first=1
     local argument
@@ -350,7 +372,7 @@ ensure_root() {
 
     info "$(t rerun_sudo)"
     exec sudo \
-        --preserve-env=DISPLAY,WAYLAND_DISPLAY,XAUTHORITY,XDG_RUNTIME_DIR,XDG_SESSION_TYPE,DBUS_SESSION_BUS_ADDRESS,VED_LANG,LANG,LC_ALL,LC_MESSAGES,VED_BACKEND,VED_CONFIG,VED_ASSUME_YES,VED_VERBOSE,VED_NO_INSTALL,VED_KEEP_TEMP,VED_SHELL,VED_SHELL_SET,VED_WINDOWS_WRITE,VED_WINDOWS_DRIVE \
+        --preserve-env=DISPLAY,WAYLAND_DISPLAY,XAUTHORITY,XDG_RUNTIME_DIR,XDG_SESSION_TYPE,DBUS_SESSION_BUS_ADDRESS,VED_LANG,LANG,LC_ALL,LC_MESSAGES,VED_BACKEND,VED_CONFIG,VED_ASSUME_YES,VED_VERBOSE,VED_NO_INSTALL,VED_KEEP_TEMP,VED_SHELL,VED_SHELL_SET,VED_WINDOWS_WRITE,VED_WINDOWS_DRIVE,VED_IMAGE,VED_DOCKER_STORAGE,VED_DOCKER_RESET,VED_DOCKER_LIST,VED_DOCKER_PRUNE \
         -- "$VED_MAIN" "$@"
 }
 
@@ -564,6 +586,22 @@ parse_cli() {
                 ;;
             --image=*)
                 VED_IMAGE="${arg#--image=}"
+                ;;
+            --docker-storage)
+                VED_DOCKER_STORAGE="${2:-}"
+                shift
+                ;;
+            --docker-storage=*)
+                VED_DOCKER_STORAGE="${arg#--docker-storage=}"
+                ;;
+            --docker-reset)
+                VED_DOCKER_RESET=1
+                ;;
+            --docker-list)
+                VED_DOCKER_LIST=1
+                ;;
+            --docker-prune)
+                VED_DOCKER_PRUNE=1
                 ;;
             -p|--root-partition|--partition)
                 VED_ROOT_PARTITION="${2:-}"
@@ -811,7 +849,8 @@ parse_cli() {
     done
 
     case "${VED_BACKEND,,}" in
-        qemu|chroot|nspawn) VED_BACKEND="${VED_BACKEND,,}" ;;
+        qemu|chroot|nspawn|docker) VED_BACKEND="${VED_BACKEND,,}" ;;
+        oci|docker-image) VED_BACKEND="docker" ;;
         powershell|pwsh|windows) VED_BACKEND="powershell" ;;
         *) die "$(t backend_invalid "$VED_BACKEND")" ;;
     esac
@@ -913,12 +952,15 @@ ved_main() {
     fi
 
     if [[ "$VED_BACKEND_SET" -eq 0 && -t 0 && -z "$VED_IMAGE" ]]; then
-        if [[ -z "$VED_DISK" && -z "$VED_ROOT_PARTITION" ]]; then
+        # Ask for the backend first: Docker/OCI images need no local disk.
+        select_backend
+        run_args+=(--backend "$VED_BACKEND")
+
+        if [[ "$VED_BACKEND" != "docker" &&
+              -z "$VED_DISK" && -z "$VED_ROOT_PARTITION" ]]; then
             select_disk
             run_args+=(--disk "$VED_DISK")
         fi
-        select_backend
-        run_args+=(--backend "$VED_BACKEND")
     fi
 
     if [[ "$VED_BACKEND" == "qemu" && -t 0 && "$VED_ARCH" == "auto" ]]; then
@@ -957,6 +999,7 @@ ved_main() {
         qemu) backend_qemu ;;
         chroot) backend_chroot ;;
         nspawn) backend_nspawn ;;
+        docker) backend_docker ;;
         powershell) backend_powershell ;;
     esac
 }

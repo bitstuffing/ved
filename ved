@@ -27,10 +27,18 @@ source "$VED_ROOT/lib/disks.sh"
 source "$VED_ROOT/lib/firmware.sh"
 # shellcheck source=lib/display.sh
 source "$VED_ROOT/lib/display.sh"
+# shellcheck source=lib/docker/registry.sh
+source "$VED_ROOT/lib/docker/registry.sh"
+# shellcheck source=lib/docker/image.sh
+source "$VED_ROOT/lib/docker/image.sh"
+# shellcheck source=lib/docker/rootfs.sh
+source "$VED_ROOT/lib/docker/rootfs.sh"
 # shellcheck source=lib/backends/qemu.sh
 source "$VED_ROOT/lib/backends/qemu.sh"
 # shellcheck source=lib/backends/chroot.sh
 source "$VED_ROOT/lib/backends/chroot.sh"
+# shellcheck source=lib/backends/docker.sh
+source "$VED_ROOT/lib/backends/docker.sh"
 # shellcheck source=lib/backends/nspawn.sh
 source "$VED_ROOT/lib/backends/nspawn.sh"
 # shellcheck source=lib/backends/powershell.sh

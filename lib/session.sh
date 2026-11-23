@@ -80,29 +80,17 @@ ensure_guest_desktop_identity() {
     guest_desktop_identity_for_command "$command" || true
 }
 
-select_session() {
+select_session_menu() {
     local option
-
-    if [[ "$VED_SESSION_SET" -eq 1 || "$VED_SESSION" != "auto" ]]; then
-        return
-    fi
-
-    if [[ "$VED_GRAPHICAL" -eq 1 ]]; then
-        VED_SESSION="shell"
-        return
-    fi
-
-    if [[ ! -t 0 ]]; then
-        VED_SESSION="shell"
-        return
-    fi
 
     echo
     info "$(t select_session)"
     printf '  1) %s\n' "$(t session_shell)"
     printf '  2) %s\n' "$(t session_app)"
     printf '  3) %s\n' "$(t session_desktop)"
-    printf '  4) %s\n' "$(t session_system)"
+    if [[ "$VED_BACKEND" != "docker" ]]; then
+        printf '  4) %s\n' "$(t session_system)"
+    fi
     echo
 
     option="$(ask "$(t select_session_prompt)" "1")"
@@ -110,10 +98,28 @@ select_session() {
         1) VED_SESSION="shell" ;;
         2) VED_SESSION="app" ;;
         3) VED_SESSION="desktop" ;;
-        4) VED_SESSION="system" ;;
+        4)
+            if [[ "$VED_BACKEND" == "docker" ]]; then
+                die "$(t docker_system_unsupported)"
+            fi
+            VED_SESSION="system"
+            ;;
         *) die "$(t invalid_option)" ;;
     esac
     VED_SESSION_SET=1
+}
+
+select_session() {
+    if [[ "$VED_SESSION_SET" -eq 1 || "$VED_SESSION" != "auto" ]]; then
+        return
+    fi
+
+    if [[ "$VED_GRAPHICAL" -eq 1 || ! -t 0 ]]; then
+        VED_SESSION="shell"
+        return
+    fi
+
+    select_session_menu
 }
 
 select_gui_target() {
@@ -196,6 +202,7 @@ gui_runtime_export_socket() {
 prepare_graphical_runtime() {
     local runtime
     local wayland_source
+    local wayland_name
     local uid="${VED_GUEST_UID:-${VED_GUI_UID:-}}"
     local gid="${VED_GUEST_GID:-${VED_GUI_GID:-}}"
 
@@ -224,15 +231,24 @@ prepare_graphical_runtime() {
     # The host Wayland compositor socket is only needed when drawing on the
     # host display. With Xephyr, DISPLAY points at the nested X server instead.
     VED_WAYLAND_EXPORT_FAILED=0
+    VED_GUEST_WAYLAND_DISPLAY=""
     if [[ "$VED_GUI_TARGET" != "nested" && -n "${WAYLAND_DISPLAY:-}" ]]; then
         wayland_source="$VED_GUI_RUNTIME/$WAYLAND_DISPLAY"
         if [[ "$WAYLAND_DISPLAY" == /* ]]; then
             wayland_source="$WAYLAND_DISPLAY"
         fi
+        wayland_name="${wayland_source##*/}"
+        if guest_starts_compositor; then
+            # A nested compositor needs the host Wayland socket as a client,
+            # but also creates its own wayland-0 server socket. Exporting the
+            # host socket under the same name makes that bind fail with
+            # "Device or resource busy"; use a distinct name for the client.
+            wayland_name="ved-host-$wayland_name"
+        fi
         if [[ -e "$wayland_source" || -S "$wayland_source" ]] &&
             gui_runtime_export_socket "$wayland_source" \
-                "$runtime/${wayland_source##*/}"; then
-            VED_GUEST_WAYLAND_DISPLAY="${wayland_source##*/}"
+                "$runtime/$wayland_name"; then
+            VED_GUEST_WAYLAND_DISPLAY="$wayland_name"
         else
             # Do not pass the host's socket *name* to the guest when the
             # socket itself could not be exported: it does not exist in the
@@ -453,12 +469,37 @@ session_build_command_ex() {
     session_build_command "$root"
 }
 
+# True when the guest itself is a Wayland compositor (Xfce Wayland, labwc,
+# GNOME devkit, ...). In that case host Wayland/X11 sockets must not be exported
+# into the guest runtime: the guest creates its own and they collide.
+guest_starts_compositor() {
+    [[ "$VED_SESSION" == "desktop" ]] || return 1
+    [[ "${VED_GUEST_SESSION_TYPE:-}" == "wayland" ||
+       "$VED_COMMAND" == *--devkit* ]]
+}
+
 guest_display_value() {
+    local display_number=90
+
     if [[ "$VED_GUI_TARGET" == "nested" && -n "$VED_NESTED_DISPLAY" ]]; then
         printf '%s' "$VED_NESTED_DISPLAY"
-    else
-        printf '%s' "${DISPLAY:-:0}"
+        return 0
     fi
+
+    # A Wayland compositor inside the guest starts its own Xwayland. It cannot
+    # use the host's X display number because /tmp/.X11-unix is shared with the
+    # host and X0 is already taken. GNOME's devkit path owns its display, so it
+    # keeps the normal value.
+    if [[ "${VED_GUEST_SESSION_TYPE:-}" == "wayland" &&
+          "$VED_COMMAND" != *--devkit* ]]; then
+        while [[ -e "/tmp/.X11-unix/X$display_number" ]]; do
+            ((display_number += 1))
+        done
+        printf ':%s' "$display_number"
+        return 0
+    fi
+
+    printf '%s' "${DISPLAY:-:0}"
 }
 
 gui_start_nested() {

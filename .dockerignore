@@ -1,0 +1,7 @@
+.git
+.github
+run
+*.log
+tests/last-run.log
+__pycache__
+*.pyc

@@ -415,7 +415,15 @@ chroot_prepare_mounts() {
         chroot_bind "/run/systemd/resolve" "$root/run/systemd/resolve" rbind || true
     fi
 
+    # Xwayland inside the guest binds an *abstract* socket named
+    # @/tmp/.X11-unix/Xn. Abstract sockets live in a kernel-global namespace,
+    # so the guest must see the host's occupied X sockets or it will pick X0
+    # and fail with "Address already in use". Many OCI images do not ship the
+    # directory, which made the bind below fail silently; create it first.
     if [[ -d /tmp/.X11-unix ]]; then
+        if [[ "$VED_DRY_RUN" -eq 0 && ! -d "$root/tmp/.X11-unix" ]]; then
+            install -d -m 1777 "$root/tmp/.X11-unix" 2>/dev/null || true
+        fi
         chroot_bind "/tmp/.X11-unix" "$root/tmp/.X11-unix" rbind || true
     fi
 
@@ -457,7 +465,7 @@ chroot_detect_user() {
         return
     fi
 
-    if ! session_is_graphical; then 
+    if ! session_is_graphical; then
         printf 'root'
         return
     fi
@@ -545,6 +553,8 @@ chroot_run() {
     local runtime="${VED_GUEST_RUNTIME:-}"
     local wayland_env=""
     local hostname_value=""
+    local workdir_q=""
+    local shell_q=""
     local -a uts_command=()
 
     shell="$(chroot_shell_for "$root" "$user")"
@@ -599,6 +609,10 @@ chroot_run() {
         )
     fi
 
+    if ((${#VED_GUEST_IMAGE_ENV[@]} > 0)); then
+        env_command+=("${VED_GUEST_IMAGE_ENV[@]}")
+    fi
+
     if [[ "$VED_GRAPHICAL" -eq 1 ]] && [[ -n "$runtime" ]]; then
         local guest_display
         guest_display="$(guest_display_value)"
@@ -636,6 +650,16 @@ chroot_run() {
         fi
     fi
 
+    if [[ -n "$VED_CHROOT_WORKDIR" ]]; then
+        workdir_q="$(shell_quote_posix "$VED_CHROOT_WORKDIR")"
+        if [[ -n "$command" ]]; then
+            command="cd $workdir_q && $command"
+        else
+            shell_q="$(shell_quote_posix "$shell")"
+            command="cd $workdir_q && exec $shell_q"
+        fi
+    fi
+
     if [[ -n "$command" ]]; then
         chroot_command+=("${env_command[@]}" /bin/sh -c "$command")
     else
@@ -643,7 +667,8 @@ chroot_run() {
     fi
 
     VED_UTS_NAMESPACE_OK=0
-    if [[ -n "$hostname_value" ]] && have unshare && have hostname; then
+    if [[ "$VED_CHROOT_DISABLE_UTS" -ne 1 && -n "$hostname_value" ]] &&
+        have unshare && have hostname; then
         VED_UTS_NAMESPACE_OK=1
         # The quoted script is executed by the inner /bin/sh, not by this shell.
         # shellcheck disable=SC2016
@@ -654,7 +679,8 @@ chroot_run() {
             "$hostname_value"
             "$(t guest_hostname_set_failed "$hostname_value")"
         )
-    elif [[ "$VED_GRAPHICAL" -eq 1 && -n "$hostname_value" ]]; then
+    elif [[ "$VED_CHROOT_DISABLE_UTS" -ne 1 && "$VED_GRAPHICAL" -eq 1 &&
+            -n "$hostname_value" ]]; then
         warn "$(t uts_unshare_unavailable)"
     fi
 
@@ -683,67 +709,37 @@ chroot_run() {
     fi
 }
 
-backend_chroot() {
-    local root="$VED_CHROOT_DIR"
-    local user
-    local command=""
-
-    warn "$(t chroot_security_warning)"
-
-    if [[ -n "$VED_ROOT_PARTITION" ]]; then
-        [[ -b "$VED_ROOT_PARTITION" ]] ||
-            die "$(t partition_missing "$VED_ROOT_PARTITION")"
-        assert_unmounted "$VED_ROOT_PARTITION"
-    else
-        select_disk
-        assert_unmounted "$VED_DISK"
-        detect_root_partition
-    fi
-
-    select_session
-
-    if [[ "$VED_SESSION" == "system" ]]; then
-        if have systemd-nspawn; then
-            info "$(t system_using_nspawn)"
-            VED_BOOT=1
-            backend_nspawn
-            return
-        fi
-        die "$(t system_needs_nspawn)"
-    fi
+chroot_prepare_graphical_session() {
+    local root="$1"
 
     if session_is_graphical; then
         VED_GRAPHICAL=1
     fi
+    [[ "$VED_GRAPHICAL" -eq 1 ]] || return 0
 
-    # fix: mount before the graphical questions to be able to inspect the guest
-    info "$(t chroot_mounting)"
-    mkdir -p "$root"
-    cleanup_add_dir "$root"
-    umount_path "$root"
-    mount_linux_root "$VED_ROOT_PARTITION" "$root" "rw"
-    info "$(t chroot_ready "$root")"
+    detect_graphical_user
+    session_probe_guest "$root"
 
-    if [[ "$VED_GRAPHICAL" -eq 1 ]]; then
-        detect_graphical_user
-        session_probe_guest "$root"
+    if session_is_graphical; then
+        if [[ "$VED_SESSION" == "desktop" && -z "$VED_COMMAND" ]]; then
+            select_desktop_session "$root" ||
+                die "$(t desktop_session_missing)"
+        fi
 
-        if session_is_graphical; then
-            if [[ "$VED_SESSION" == "desktop" &&
-                  -z "$VED_COMMAND" ]]; then
-                select_desktop_session "$root" ||
-                    die "$(t desktop_session_missing)"
-            fi
-
-            if [[ "$VED_SESSION" == "app" && -z "$VED_COMMAND" && -t 0 ]]; then
-                VED_COMMAND="$(ask "$(t app_command_prompt)" "")"
-            fi
-            select_gui_target
-            if [[ "$VED_GUI_TARGET" == "nested" ]]; then
-                gui_start_nested || true
-            fi
+        if [[ "$VED_SESSION" == "app" && -z "$VED_COMMAND" && -t 0 ]]; then
+            VED_COMMAND="$(ask "$(t app_command_prompt)" "")"
+        fi
+        select_gui_target
+        if [[ "$VED_GUI_TARGET" == "nested" ]]; then
+            gui_start_nested || true
         fi
     fi
+}
+
+chroot_execute_session() {
+    local root="$1"
+    local user
+    local command=""
 
     show_configuration
 
@@ -758,9 +754,12 @@ backend_chroot() {
         prepare_graphical_runtime
     fi
 
-    chroot_prepare_mounts "$root"
+    if [[ "$VED_BACKEND" == "docker" ]]; then
+        docker_ensure_guest_home "$root" "$user"
+    fi
 
-    chroot_mark_time_synced "$root" 
+    chroot_prepare_mounts "$root"
+    chroot_mark_time_synced "$root"
 
     if session_is_graphical; then
         command="$(session_build_command_ex "$root" || true)"
@@ -792,4 +791,43 @@ backend_chroot() {
     fi
 
     chroot_run "$root" "$user" "$command"
+}
+
+backend_chroot() {
+    local root="$VED_CHROOT_DIR"
+
+    warn "$(t chroot_security_warning)"
+
+    if [[ -n "$VED_ROOT_PARTITION" ]]; then
+        [[ -b "$VED_ROOT_PARTITION" ]] ||
+            die "$(t partition_missing "$VED_ROOT_PARTITION")"
+        assert_unmounted "$VED_ROOT_PARTITION"
+    else
+        select_disk
+        assert_unmounted "$VED_DISK"
+        detect_root_partition
+    fi
+
+    select_session
+
+    if [[ "$VED_SESSION" == "system" ]]; then
+        if have systemd-nspawn; then
+            info "$(t system_using_nspawn)"
+            VED_BOOT=1
+            backend_nspawn
+            return
+        fi
+        die "$(t system_needs_nspawn)"
+    fi
+
+    # Mount before the graphical questions so the guest can be inspected.
+    info "$(t chroot_mounting)"
+    mkdir -p "$root"
+    cleanup_add_dir "$root"
+    umount_path "$root"
+    mount_linux_root "$VED_ROOT_PARTITION" "$root" "rw"
+    info "$(t chroot_ready "$root")"
+
+    chroot_prepare_graphical_session "$root"
+    chroot_execute_session "$root"
 }

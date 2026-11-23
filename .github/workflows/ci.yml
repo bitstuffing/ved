@@ -9,8 +9,12 @@ permissions:
 
 jobs:
   check:
-    name: Shell checks and CLI tests
-    runs-on: ubuntu-latest
+    name: Shell checks and CLI tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
 
     steps:
       - name: Check out repository
@@ -21,5 +25,33 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes shellcheck
 
+      - name: Check shellcheck version
+        run: shellcheck --version
+
+      - name: Check formatting
+        run: make fmt-check
+
       - name: Run validation suite
-        run: make check
+        run: tests/run.sh --ci --verbose
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ved-test-log-${{ matrix.os }}
+          path: tests/last-run.log
+          if-no-files-found: ignore
+
+  container:
+    name: Reproducible container test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build test image
+        run: docker build -f Dockerfile.test -t ved-test .
+
+      - name: Run test image
+        run: docker run --rm ved-test

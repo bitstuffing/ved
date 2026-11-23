@@ -37,13 +37,14 @@ Backends:
   qemu                  Run a physical disk, partition or disk image in QEMU/KVM
   chroot                Mount an installed Linux system and enter it with chroot
   nspawn                Mount an installed Linux system and run it with systemd-nspawn
+  docker                Download an OCI image and run its rootfs with chroot
   powershell            Mount a Windows partition and open pwsh or cmd (no VM)
 
 Common options:
-  -b, --backend NAME    qemu, chroot, nspawn or powershell (default: qemu)
+  -b, --backend NAME    qemu, chroot, nspawn, docker or powershell (default: qemu)
   -L, --lang CODE       Language code: en, es (default: from the environment)
   -d, --disk DEVICE     Physical disk, for example /dev/nvme0n1
-  -i, --image FILE      Disk image file (QEMU backend)
+  -i, --image REF       Disk image file (QEMU) or OCI image reference (Docker)
   -p, --partition DEV   Linux root partition (chroot/nspawn) or Windows partition
       --esp DEVICE      EFI system partition (auto-detected by default)
       --os TYPE         auto, linux or windows (default: auto)
@@ -81,7 +82,12 @@ Common options:
       --gui TARGET      Draw the graphical session on the host or in a nested
                         Xephyr window: host or nested (default: ask)
       --nested          Shortcut for --gui nested
-      --arch ARCH       QEMU guest architecture: auto, x86_64 or aarch64
+      --arch ARCH       QEMU guest / Docker image architecture: auto, x86_64 or aarch64
+      --docker-storage DIR
+                        Persistent OCI image and rootfs storage directory
+      --docker-reset    Rebuild the Docker rootfs from its image layers
+      --docker-list     List cached Docker/OCI images
+      --docker-prune    Remove cached images that have no saved rootfs
 
 Other options:
       --config FILE     Load a configuration file before applying options
@@ -99,6 +105,7 @@ Other options:
     [backend_chroot]="Enter an installed Linux system (chroot)"
     [backend_nspawn]="Run an installed Linux system as a container (systemd-nspawn)"
     [backend_powershell]="Open PowerShell or cmd on a Windows partition (no VM)"
+    [backend_docker]="Download a Docker/OCI image and run it as a chroot environment"
     [select_session]="What do you want to launch inside the system?"
     [session_shell]="An interactive shell"
     [session_app]="A single graphical application"
@@ -294,6 +301,29 @@ Other options:
     [chroot_shell]="Opening an interactive shell in the chroot."
     [chroot_graphical]="Binding the host display and audio into a private runtime directory."
     [chroot_security_warning]="chroot is not a security boundary; only use it with a trusted installed system."
+
+    [docker_chroot_warning]="The image is extracted to a normal directory and executed with chroot. This is not a container: there is no Docker daemon, namespace isolation, cgroup or security boundary."
+    [docker_skopeo_missing]="skopeo is required to download Docker/OCI images."
+    [docker_tar_missing]="tar is required to extract Docker/OCI image layers."
+    [docker_image_missing]="No OCI image reference was specified."
+    [docker_image_prompt]="OCI image to run, for example alpine:latest: "
+    [docker_image_and_disk]="Use either --image or --disk/--partition, not both."
+    [docker_pulling]="Downloading OCI image %s..."
+    [docker_image_cached]="Using cached OCI image %s."
+    [docker_pull_failed]="Could not download OCI image %s."
+    [docker_metadata_failed]="Could not read the OCI image configuration."
+    [docker_image_removed]="Removed unused cached image %s."
+    [docker_system_unsupported]="Booting a full system is not supported for Docker images; use chroot or nspawn instead."
+    [docker_platform_mismatch]="OCI image platform %s does not match this host (%s)."
+    [docker_zstd_missing]="zstd is required to extract this Docker/OCI layer."
+    [docker_unsafe_layer]="Refusing to extract an unsafe path from an OCI layer: %s"
+    [docker_layer_missing]="OCI layer blob is missing: %s"
+    [docker_layer_failed]="Could not extract OCI layer %s."
+    [docker_layer_apply]="Applying OCI layer %s..."
+    [docker_rootfs_reset]="Recreating Docker rootfs %s from image layers."
+    [docker_rootfs_failed]="Could not prepare the Docker rootfs."
+    [docker_workdir_missing]="The image working directory %s is not present in the rootfs; using / instead."
+    [docker_home_prepared]="Created and ownership-fixed the image user's home directory %s."
     [chroot_no_user]="No usable user was found inside the chroot; using root."
     [chroot_unmount]="Unmounting the chroot filesystems..."
     [chroot_bind_failed]="Could not bind-mount: %s"

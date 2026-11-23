@@ -1,9 +1,9 @@
 # ved — Virtual External Devices
 
-**Boot a physical disk, a partition or a disk image as a virtual machine, enter an installed Linux system as a chroot / container, or open a PowerShell / cmd prompt on a Windows partition — from one command.**
+**Boot a physical disk, a partition or a disk image as a virtual machine, enter an installed Linux system as a chroot / container, download a Docker/OCI image and run it as a persistent chroot environment, or open a PowerShell / cmd prompt on a Windows partition — from one command.**
 
-`ved` is a single, modular Bash tool that wraps QEMU/KVM, `chroot`, `systemd-nspawn`
-and `pwsh`/Wine behind a friendly, interactive menu. It auto-detects your disks, EFI loaders, GPUs,
+`ved` is a single, modular Bash tool that wraps QEMU/KVM, `chroot`, `systemd-nspawn`,
+Docker/OCI image layers and `pwsh`/Wine behind a friendly, interactive menu. It auto-detects your disks, EFI loaders, GPUs,
 TPM and USB devices, installs missing OS packages for your distribution (PowerShell is a
 deliberate exception), and asks for the administrator password only once.
 
@@ -17,6 +17,11 @@ deliberate exception), and asks for the administrator password only once.
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Backends](#backends)
+- [Docker images as chroot environments](#docker-images-as-chroot-environments)
+  - [How it works](#how-it-works)
+  - [Image storage and persistence](#image-storage-and-persistence)
+  - [Image metadata and platform checks](#image-metadata-and-platform-checks)
+  - [Security and limitations](#security-and-limitations)
 - [PowerShell / cmd on a Windows partition (no VM)](#powershell--cmd-on-a-windows-partition-no-vm)
   - [Installing pwsh](#installing-pwsh)
   - [What the backend does](#what-the-backend-does)
@@ -33,6 +38,7 @@ deliberate exception), and asks for the administrator password only once.
 - [Examples](#examples)
 - [Project layout](#project-layout)
 - [Development and testing](#development-and-testing)
+  - [Reproducible container testing](#reproducible-container-testing)
   - [What the suite covers](#what-the-suite-covers)
   - [Adding a test](#adding-a-test)
   - [Manual smoke tests](#manual-smoke-tests)
@@ -46,9 +52,11 @@ deliberate exception), and asks for the administrator password only once.
 - **One entry point**: `./ved`. Run it with no arguments for an interactive menu.
 - **Physical disks, partitions or images**: pass a whole disk (`--disk`), a Linux root
   partition (`--partition`) or a disk image (`--image`).
-- **Four backends**: QEMU/KVM, `chroot`, `systemd-nspawn`, and a Windows shell
-  backend that mounts an NTFS partition and opens **PowerShell 7 (`pwsh`)** or
+- **Five backends**: QEMU/KVM, `chroot`, `systemd-nspawn`, Docker/OCI image, and a
+  Windows shell backend that mounts an NTFS partition and opens **PowerShell 7 (`pwsh`)** or
   **cmd (via Wine)** — with no QEMU process at all.
+- **Docker images without Docker**: download Alpine, Debian, Ubuntu or any OCI image
+  with `skopeo`, extract its layers into a plain directory and execute it with `chroot`.
 - **Automatic detection** of disks, EFI system partitions, EFI loaders, guest OS,
   DRM render nodes, hardware TPM and USB devices.
 - **OpenGL acceleration** through `virtio-vga-gl` and a selected DRM render node,
@@ -80,7 +88,7 @@ deliberate exception), and asks for the administrator password only once.
 - Linux with **Bash 4.3+**.
 - **KVM** (`/dev/kvm`) for hardware acceleration — falls back to TCG (slow) if absent.
 - A graphical session if you want a windowed VM (SPICE/GTK viewer) or a graphical
-  chroot/nspawn session.
+  chroot/nspawn/Docker session.
 
 `ved` checks for its dependencies and can install them automatically. The logical
 dependencies are:
@@ -94,6 +102,9 @@ dependencies are:
 | SPICE viewer (optional) | `virt-viewer` (`remote-viewer`, `virt-viewer`, `spicy`) |
 | Software TPM (optional) | `swtpm` |
 | Containers (nspawn backend) | `systemd-container` |
+| OCI image download (docker backend) | `skopeo` |
+| Layer extraction (docker backend) | `tar` (and `zstd` for zstd-compressed layers when `tar` lacks `--zstd`) |
+| OCI metadata (docker backend, optional) | `python3`; a `sed` fallback is used when absent |
 | Windows shell (powershell backend) | `pwsh` (PowerShell 7) — **not auto-installed**, see below |
 | NTFS access (powershell backend) | `ntfs-3g` (or kernel `ntfs3` support) |
 | cmd shell (optional) | `wine` |
@@ -145,12 +156,13 @@ Run it with no options — the interactive menu guides you through everything:
 
 The tool will:
 
-1. scan and list your physical disks, and ask which one to use;
-2. ask what to do with it (virtual machine, chroot, container or Windows shell);
-3. ask for the administrator password (once);
-4. mount the system, inspect it and detect the EFI loader, guest OS, desktop,
+1. ask what you want to do (virtual machine, chroot, container, Docker/OCI image or Windows shell);
+2. for every backend except Docker/OCI, scan and list your physical disks and ask which one to use;
+3. ask what to launch inside the system (Docker images do not offer full-system boot);
+4. ask for the administrator password (once);
+5. mount the system or extract the OCI layers, inspect it and detect the EFI loader, guest OS, desktop,
    memory, CPUs and storage mode;
-5. show a summary of exactly what it is about to launch, and start it.
+6. show a summary of exactly what it is about to launch, and start it.
 
 ## Backends
 
@@ -159,9 +171,106 @@ The tool will:
 | **QEMU/KVM** | `-b qemu` | Runs a physical disk, a partition or an image as a full virtual machine (UEFI + SPICE). |
 | **chroot** | `-b chroot` | Mounts an installed Linux system and enters it with `chroot`. Can bind the host display/audio with `--graphical`. |
 | **systemd-nspawn** | `-b nspawn` | Mounts an installed Linux system and runs it as a container; `--boot` boots it with systemd. |
+| **Docker/OCI image** | `-b docker` (aliases: `oci`, `docker-image`) | Downloads an OCI image with `skopeo`, extracts it to a directory and runs it with `chroot`. No Docker daemon, container runtime, namespaces or cgroups. |
 | **Windows shell** | `-b powershell` (aliases: `pwsh`, `windows`) | Mounts a Windows partition and opens native PowerShell 7 (`--shell pwsh`) or Wine cmd (`--shell cmd`). No QEMU, no graphics stack. |
 
-> **Security:** `chroot` is not a security boundary. It runs with host privileges and exposes host kernel interfaces to the installed system. Use it only with installations you trust; use QEMU for untrusted disks or images.
+> **Security:** `chroot` is not a security boundary. It runs with host privileges and exposes host kernel interfaces to the installed system. Use it only with installations you trust; use QEMU for untrusted disks or images. The same warning applies to the Docker backend: an OCI image is **not** sandboxed here.
+
+## Docker images as chroot environments
+
+The Docker backend treats a Docker/OCI image purely as a convenient distribution
+format for a Linux root filesystem. It downloads the image with `skopeo` (no
+Docker Engine) and then relies on VED's existing `chroot` infrastructure to
+prepare `/dev`, `/proc`, `/sys`, `/run`, resolution, audio and the graphical
+session. The image is executed directly on the host kernel.
+
+```bash
+./ved --backend docker --image alpine:latest
+./ved --backend docker --image debian:stable
+./ved --backend docker --image ubuntu:latest
+./ved -b docker -i alpine:latest -c 'sh -c "cat /etc/os-release"'
+./ved -b docker -i ubuntu:latest --graphical --session app --app xterm
+```
+
+The image is optional in an interactive terminal: `ved -b docker` prompts for
+one and defaults to `alpine:latest`. Registry references can be prefixed with
+`docker://` or `oci:`; Docker Hub and other `skopeo`-compatible registries work.
+
+### How it works
+
+1. `skopeo copy docker://<ref> dir:<cache>` downloads the manifest, configuration
+   and layer blobs to persistent storage.
+2. OCI layers are unpacked in order with `tar` into a plain rootfs directory.
+   gzip, zstd and bzip2 layers are supported; `zstd` is used when installed
+   `tar` does not support `--zstd`.
+3. Whiteout files (`.wh.<name>` and `.wh..wh..opq`) are applied correctly, so
+   deleted and hidden files from lower layers do not reappear. Unsafe absolute
+   or `..` paths are rejected.
+4. Image environment variables, `ENTRYPOINT`, `CMD` and `WorkingDir` are read
+   from the OCI configuration. Host-controlled variables such as `DISPLAY`,
+   `XAUTHORITY`, `DBUS_*` and `XDG_*` are never overridden by image metadata.
+5. The resulting directory is passed to VED's normal chroot session flow, so
+   `--graphical`, `--session`, `--app`, `--shell` and `--command` behave as they
+   do for an installed Linux system.
+6. For desktop sessions, VED creates the image user's home directory when the
+   image does not contain one (common in LinuxServer/Webtop images), fixes its
+   ownership and pre-creates the usual XDG directories.
+7. When the guest itself starts a nested Wayland compositor (Xfce Wayland,
+   labwc, GNOME devkit), VED exports the host Wayland socket under a distinct
+   name (`ved-host-wayland-N`). The compositor can then connect to the host as
+   a client while still creating its own `wayland-0` server socket without a
+   name collision. VED also makes sure the guest can see the host's
+   `/tmp/.X11-unix` sockets so its Xwayland selects a free display number
+   instead of colliding with the host's `X0`.
+8. Image `ENTRYPOINT`/`CMD` are only used as a fallback for single-app
+   sessions. Interactive shells and VED's desktop sessions never inherit an
+   init system such as s6 `/init`, which refuses to run outside PID 1.
+
+An explicit `--command` always wins. Otherwise only single-app sessions fall
+back to the image's `ENTRYPOINT` plus `CMD`; shell sessions start a shell and
+desktop sessions use VED's own session picker.
+
+### Image storage and persistence
+
+By default images and rootfs directories live under
+`${XDG_DATA_HOME:-~/.local/share}/ved/docker` (or `/root/.local/share/ved/docker`
+when run as root). Override the location with `--docker-storage DIR`.
+
+```bash
+./ved -b docker --docker-storage /var/lib/ved/docker --image alpine:latest
+./ved -b docker --docker-list
+./ved -b docker --docker-prune
+./ved -b docker --image alpine:latest --docker-reset
+```
+
+Cached images are reused automatically. Changes made inside the rootfs persist
+between sessions; only `--docker-reset` rebuilds a rootfs from its image layers.
+`--docker-prune` removes cached images that no longer have a saved rootfs.
+
+### Image metadata and platform checks
+
+`ved` compares the image's `architecture` and `os` fields with the host and
+refuses incompatible images with a clear error. `--arch x86_64|aarch64` also
+requests the matching platform from the registry when `skopeo` supports
+`--override-arch`. Supported architectures are amd64/x86_64 and arm64/aarch64.
+
+`python3` provides robust JSON parsing when available; otherwise a small `sed`
+fallback is used. `WORKDIR` is honoured for both commands and interactive
+shells. Image `ENV` values are passed to the guest, except for variables that
+would break VED's display, identity or D-Bus integration.
+
+### Security and limitations
+
+- **chroot is not a security boundary.** There are no namespaces, cgroups,
+  capabilities restrictions, seccomp or Docker daemon. Only use trusted images.
+- OCI layers are extracted as root; malicious images can contain setuid files,
+  device nodes or unusual ownership. VED rejects path traversal, but image
+  content is otherwise trusted.
+- Image entrypoints that rely on container-runtime behaviour (mount propagation,
+  cgroups, `/dev/shm` sizing, service discovery, etc.) may need adjustment.
+- `--session system`/`--boot` is not supported for Docker images; use the
+  `chroot` or `nspawn` backend with an installed system instead.
+- Docker images with non-Linux OS values are rejected.
 
 ## PowerShell / cmd on a Windows partition (no VM)
 
@@ -516,10 +625,10 @@ keypresses, and you never need another terminal to manage the container.
 
 ```
 Common options:
-  -b, --backend NAME    qemu, chroot, nspawn or powershell (default: qemu)
+  -b, --backend NAME    qemu, chroot, nspawn, docker or powershell (default: qemu)
   -L, --lang CODE       Language code: en, es (default: from the environment)
   -d, --disk DEVICE     Physical disk, for example /dev/nvme0n1
-  -i, --image FILE      Disk image file (QEMU backend)
+  -i, --image REF       Disk image file (QEMU) or OCI image reference (Docker)
   -p, --partition DEV   Linux root partition (chroot/nspawn) or Windows partition
       --root-partition DEV
                         Alias for --partition
@@ -546,13 +655,13 @@ Common options:
       --gl              Force OpenGL acceleration
       --no-gl           Disable OpenGL acceleration
       --render-node DEV Force a DRM render node, for example /dev/dri/renderD128
-      --user NAME       User to use inside a chroot or nspawn container
-  -c, --command CMD     Command to run in the chroot, nspawn or powershell backend
+      --user NAME       User to use inside a chroot, nspawn or Docker guest
+  -c, --command CMD     Command to run in chroot, nspawn, Docker or powershell
       --shell NAME      powershell backend: pwsh or cmd (default: pwsh)
       --windows-write   Mount the Windows partition read-write (default: read-only)
       --windows-ro      Force read-only (useful to override a config file)
       --windows-drive L Drive letter for the partition in pwsh (default: C)
-      --graphical       Bind the host display and audio into chroot/nspawn
+      --graphical       Bind the host display and audio into chroot/nspawn/Docker
       --boot            Boot the guest with systemd-nspawn instead of a command
       --session MODE    shell, app, desktop or system (default: ask)
       --app CMD         Run one graphical application (implies --session app)
@@ -561,7 +670,12 @@ Common options:
                         Alias for --gui
       --nested          Shortcut for --gui nested
       --host-display    Shortcut for --gui host
-      --arch ARCH       QEMU guest architecture: auto, x86_64 or aarch64
+      --arch ARCH       QEMU guest / Docker image architecture: auto, x86_64 or aarch64
+      --docker-storage DIR
+                        Persistent OCI image and rootfs storage directory
+      --docker-reset    Rebuild the Docker rootfs from its image layers
+      --docker-list     List cached Docker/OCI images
+      --docker-prune    Remove cached images that have no saved rootfs
 
 Other options:
       --config FILE     Load a configuration file before applying options (trusted Bash code)
@@ -605,6 +719,19 @@ Other options:
 # Same with nspawn (experimental for GNOME 49+)
 ./ved --backend nspawn --partition /dev/nvme0n1p2 --graphical --session desktop
 
+# Download an Alpine image and open an interactive shell in its persistent rootfs
+./ved --backend docker --image alpine:latest
+
+# Run a Debian image command, then reuse the extracted rootfs next time
+./ved -b docker -i debian:stable -c 'cat /etc/debian_version'
+
+# Graphical application from an Ubuntu OCI image
+./ved -b docker -i ubuntu:latest --graphical --session app --app xterm
+
+# Inspect cached images or reset an extracted rootfs
+./ved -b docker --docker-list
+./ved -b docker -i alpine:latest --docker-reset
+
 # Inspect the exact command that would be used for a desktop session
 ./ved --backend chroot --partition /dev/nvme0n1p2 --graphical --session desktop --dry-run
 
@@ -647,9 +774,14 @@ lib/
   firmware.sh           OVMF, TPM, audio, render nodes, USB detection
   display.sh            display mode selection and viewer launch
   session.sh            guest desktop probing and session setup
+  docker/
+    registry.sh         skopeo download, image cache, storage helpers
+    image.sh            OCI manifest/config metadata and platform checks
+    rootfs.sh           layer extraction, whiteouts and persistent rootfs
   backends/
     qemu.sh             QEMU/KVM backend
-    chroot.sh           chroot backend
+    chroot.sh           chroot backend and shared chroot session helpers
+    docker.sh           Docker/OCI image backend
     nspawn.sh           systemd-nspawn backend
     powershell.sh       Windows-partition shell backend (pwsh / Wine cmd)
 locale/
@@ -675,11 +807,36 @@ make syntax  # bash -n on ved, lib/*.sh, locale/*.sh
 make test    # non-privileged CLI regression tests
 make lint    # ShellCheck (skipped with a warning if not installed)
 make check   # syntax + test + lint; this is the default target
+make ci      # strict: format check + shellcheck required + all tests
+make help    # list every available target
+```
+
+`tests/run.sh` is the underlying runner and adds developer conveniences:
+
+```bash
+tests/run.sh --list                 # list all case names
+tests/run.sh --filter docker        # run only matching cases
+tests/run.sh --filter docker --verbose   # trace into tests/last-run.log
+tests/run.sh --keep-tmp             # keep the temporary test directory for inspection
+tests/run.sh --no-lint --no-syntax  # tests only
 ```
 
 Each check prints `ok - <name>`; a failure prints `not ok - <name>` and makes the
-suite exit non-zero. GitHub Actions runs `make check` on every push and pull
-request (`.github/workflows/ci.yml`) and installs ShellCheck on the runner.
+suite exit non-zero. GitHub Actions runs the strict suite on every push and pull
+request (`.github/workflows/ci.yml`) on Ubuntu 24.04 and 22.04, installs
+ShellCheck, checks formatting, uploads the traced test log as an artifact, and
+also runs the same suite inside `Dockerfile.test`.
+
+### Reproducible container testing
+
+`Dockerfile.test` pins a Debian base with the exact tools the suite needs, so
+local results match CI without installing anything on the host:
+
+```bash
+make test-container   # uses docker, or podman as a fallback
+```
+
+The container runs `tests/run.sh --ci`; no devices, mounts or `sudo` are needed.
 
 ### What the suite covers
 
@@ -700,7 +857,15 @@ request (`.github/workflows/ci.yml`) and installs ShellCheck on the runner.
   - clean `runuser` environment for both `pwsh` and Wine: `HOME`, `USER`,
     `LOGNAME` and `XDG_*` come from `passwd`, never from root;
   - dry-run construction of the interactive, one-shot and `cmd` commands;
-  - distribution-specific PowerShell install hints.
+  - distribution-specific PowerShell install hints;
+  - **Docker/OCI helpers**: skopeo blob naming, manifest/config parsing,
+    layer digests, whiteout handling, symlink-traversal rejection, persistent
+    rootfs, guest home creation, backend flow and ENTRYPOINT/CMD precedence;
+  - **Graphical sessions**: desktop menu filtering for Docker, Wayland socket
+    export naming, private Xwayland display numbers, private system bus,
+    login1 stubs, memlock limits and libgcrypt FIPS masking;
+  - **Repository integrity**: English/Spanish message-key parity and that
+    every sourced module path actually exists.
 
 ### Adding a test
 
@@ -711,7 +876,12 @@ run_ved my_new_check 1 'Expected error text' --backend powershell --shell fish
 ```
 
 For internal helpers, add a function that runs in a subshell, source only the
-modules it needs, stub external commands, and call `pass`/`fail` explicitly:
+modules it needs, stub external commands, and return non-zero on failure. Register
+it with `run_case` next to the other registrations:
+
+```bash
+run_case 'my new helper' run_my_helper
+```
 
 ```bash
 run_my_helper() (

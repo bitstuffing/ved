@@ -37,14 +37,15 @@ Backends:
   qemu                  Arranca un disco físico, partición o imagen en QEMU/KVM
   chroot                Monta un Linux instalado y entra con chroot
   nspawn                Monta un Linux instalado y lo ejecuta con systemd-nspawn
+  docker                Descarga una imagen OCI y ejecuta su rootfs con chroot
   powershell            Monta una partición Windows y abre pwsh o cmd (sin VM)
 
 Opciones comunes:
-  -b, --backend NOMBRE  qemu, chroot, nspawn o powershell (por defecto: qemu)
+  -b, --backend NOMBRE  qemu, chroot, nspawn, docker o powershell (por defecto: qemu)
   -L, --lang CÓDIGO     Código de idioma: en, es (por defecto: el del entorno)
   -d, --disk DISPOSITIVO
                         Disco físico, por ejemplo /dev/nvme0n1
-  -i, --image ARCHIVO   Archivo de imagen de disco (backend qemu)
+  -i, --image REF       Archivo de imagen de disco (QEMU) o referencia OCI (Docker)
   -p, --partition DISP  Partición raíz de Linux (chroot/nspawn) o partición Windows
       --esp DISPOSITIVO Partición EFI (se detecta automáticamente)
       --os TIPO         auto, linux o windows (por defecto: auto)
@@ -83,7 +84,12 @@ Opciones comunes:
       --gui TARGET      Muestra la sesión gráfica en el host o en una ventana
                         anidada Xephyr: host o nested (por defecto: preguntar)
       --nested          Atajo de --gui nested
-      --arch ARCH       Arquitectura del invitado QEMU: auto, x86_64 o aarch64
+      --arch ARCH       Arquitectura QEMU / imagen Docker: auto, x86_64 o aarch64
+      --docker-storage DIR
+                        Directorio persistente de imágenes y rootfs OCI
+      --docker-reset    Reconstruye el rootfs Docker a partir de las capas de imagen
+      --docker-list     Lista las imágenes Docker/OCI en caché
+      --docker-prune    Elimina imágenes en caché sin rootfs guardado
 
 Otras opciones:
       --config ARCHIVO  Carga un archivo de configuración antes de las opciones
@@ -101,6 +107,7 @@ Otras opciones:
     [backend_chroot]="Entrar en un sistema Linux instalado (chroot)"
     [backend_nspawn]="Ejecutar un sistema Linux instalado como contenedor (systemd-nspawn)"
     [backend_powershell]="Abrir PowerShell o cmd en una partición Windows (sin VM)"
+    [backend_docker]="Descargar una imagen Docker/OCI y ejecutarla como entorno chroot"
     [select_session]="¿Qué quieres lanzar dentro del sistema?"
     [session_shell]="Un intérprete de órdenes interactivo"
     [session_app]="Una sola aplicación gráfica"
@@ -296,6 +303,29 @@ Otras opciones:
     [chroot_shell]="Abriendo un intérprete de órdenes en el chroot."
     [chroot_graphical]="Compartiendo la pantalla y el audio del host en un directorio de ejecución privado."
     [chroot_security_warning]="chroot no es una frontera de seguridad; úselo solo con un sistema instalado de confianza."
+
+    [docker_chroot_warning]="La imagen se extrae en un directorio normal y se ejecuta con chroot. No es un contenedor: no hay daemon Docker, espacios de nombres, cgroups ni frontera de seguridad."
+    [docker_skopeo_missing]="Se necesita skopeo para descargar imágenes Docker/OCI."
+    [docker_tar_missing]="Se necesita tar para extraer capas de imágenes Docker/OCI."
+    [docker_image_missing]="No se especificó ninguna referencia de imagen OCI."
+    [docker_image_prompt]="Imagen OCI a ejecutar, por ejemplo alpine:latest: "
+    [docker_image_and_disk]="Use --image o --disk/--partition, pero no ambos."
+    [docker_pulling]="Descargando imagen OCI %s..."
+    [docker_image_cached]="Usando la imagen OCI en caché %s."
+    [docker_pull_failed]="No se pudo descargar la imagen OCI %s."
+    [docker_metadata_failed]="No se pudo leer la configuración de la imagen OCI."
+    [docker_image_removed]="Se eliminó la imagen en caché %s."
+    [docker_system_unsupported]="Arrancar un sistema completo no es compatible con imágenes Docker; use chroot o nspawn."
+    [docker_platform_mismatch]="La plataforma de imagen OCI %s no coincide con este host (%s)."
+    [docker_zstd_missing]="Se necesita zstd para extraer esta capa Docker/OCI."
+    [docker_unsafe_layer]="Se rechazó una ruta no segura en una capa OCI: %s"
+    [docker_layer_missing]="Falta el blob de la capa OCI: %s"
+    [docker_layer_failed]="No se pudo extraer la capa OCI %s."
+    [docker_layer_apply]="Aplicando capa OCI %s..."
+    [docker_rootfs_reset]="Recreando el rootfs Docker %s a partir de las capas de imagen."
+    [docker_rootfs_failed]="No se pudo preparar el rootfs Docker."
+    [docker_workdir_missing]="El directorio de trabajo de la imagen %s no existe en el rootfs; se usará /."
+    [docker_home_prepared]="Se creó y se ajustó la propiedad del directorio personal del usuario de la imagen %s."
     [chroot_no_user]="No se ha encontrado un usuario utilizable dentro del chroot; se usará root."
     [chroot_unmount]="Desmontando los sistemas de archivos del chroot..."
     [chroot_bind_failed]="No se pudo montar por bind: %s"

@@ -54,6 +54,7 @@ select_backend() {
     printf '  2) %s\n' "$(t backend_chroot)"
     printf '  3) %s\n' "$(t backend_nspawn)"
     printf '  4) %s\n' "$(t backend_powershell)"
+    printf '  5) %s\n' "$(t backend_docker)"
     echo
 
     option="$(ask "$(t select_backend_prompt)" "1")"
@@ -62,6 +63,7 @@ select_backend() {
         2) VED_BACKEND="chroot" ;;
         3) VED_BACKEND="nspawn" ;;
         4) VED_BACKEND="powershell" ;;
+        5) VED_BACKEND="docker" ;;
         *) die "$(t invalid_option)" ;;
     esac
     VED_BACKEND_SET=1

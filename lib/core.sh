@@ -83,6 +83,17 @@ VED_GUEST_RUNTIME=""
 VED_GUEST_WAYLAND_DISPLAY=""
 VED_GUEST_UID=""
 VED_GUEST_GID=""
+VED_GUEST_SESSION_TYPE=""
+VED_GUEST_NO_X11=0
+VED_WAYLAND_EXPORT_FAILED=0
+VED_GUEST_SESSION_DESKTOP=""
+VED_GUEST_CURRENT_DESKTOP=""
+VED_GUEST_HOSTNAME=""
+VED_GUEST_SYSTEM_BUS_ADDRESS=""
+VED_GUEST_SYSTEM_BUS_PID=""
+VED_GUEST_LOGIN1_STUB_PID=""
+VED_NSPAWN_GUEST_BUS_DIR=""
+VED_UTS_NAMESPACE_OK=0
 
 VED_OVMF_CODE=""
 VED_OVMF_VARS_TEMPLATE=""
@@ -144,6 +155,57 @@ debug() {
 
 have() {
     command -v "$1" >/dev/null 2>&1
+}
+
+# GNOME Keyring allocates libgcrypt secure memory. In a container/chroot the
+# process keeps the host UID, so the system-wide RLIMIT_MEMLOCK can already be
+# exhausted by the host session even when this shell still shows several MB.
+# Try to raise both limits before entering a graphical session. This only works
+# when the caller really has CAP_SYS_RESOURCE; systemd-nspawn additionally sets
+# LimitMEMLOCK on its scope unit, which normally has that capability.
+raise_graphical_memlock_limit() {
+    [[ "${VED_GRAPHICAL:-0}" -eq 1 ]] || return 0
+
+    local soft hard
+    soft="$(ulimit -Sl 2>/dev/null || printf '0')"
+    hard="$(ulimit -Hl 2>/dev/null || printf '0')"
+
+    [[ "$soft" == "unlimited" ]] && return 0
+
+    if have prlimit; then
+        prlimit --memlock=unlimited:unlimited --pid $$ >/dev/null 2>&1 && return 0
+        prlimit --memlock=134217728:134217728 --pid $$ >/dev/null 2>&1 && return 0
+    fi
+
+    if [[ "$hard" == "unlimited" ]]; then
+        ulimit -Sl unlimited >/dev/null 2>&1 && return 0
+    elif [[ "$hard" =~ ^[0-9]+$ ]] && ((hard > soft)); then
+        ulimit -Sl "$hard" >/dev/null 2>&1 && return 0
+    fi
+
+    warn "$(t memlock_raise_failed)"
+    return 1
+}
+
+# libgcrypt enters FIPS mode if /etc/gcrypt/fips_enabled merely exists. FIPS
+# mode forbids its normal unlocked secure-memory fallback, so GNOME Keyring
+# aborts with "out of core in secure memory" when mlock cannot be satisfied.
+# Mask that force switch for graphical guests; a nested desktop is not a FIPS
+# boundary, and the guest's original file is restored when the mount is removed.
+prepare_guest_nonfips_config() {
+    local root="$1"
+    local file="$root/etc/gcrypt/fips_enabled"
+
+    [[ -d "$root/etc" ]] || return 0
+    mkdir -p "$(dirname "$file")" 2>/dev/null || return 1
+    if [[ -L "$file" ]]; then
+        warn "$(t guest_fips_mask_failed)"
+        return 1
+    fi
+    if [[ ! -e "$file" ]]; then
+        : >"$file" 2>/dev/null || return 1
+    fi
+    printf '%s' "$file"
 }
 
 require_command() {
@@ -346,6 +408,16 @@ detect_graphical_user_optional() {
         VED_GUEST_WAYLAND_DISPLAY=""
         VED_GUEST_UID=""
         VED_GUEST_GID=""
+        VED_GUEST_SESSION_TYPE=""
+        VED_GUEST_NO_X11=0
+        VED_WAYLAND_EXPORT_FAILED=0
+        VED_GUEST_SESSION_DESKTOP=""
+        VED_GUEST_CURRENT_DESKTOP=""
+        VED_GUEST_HOSTNAME=""
+        VED_GUEST_SYSTEM_BUS_ADDRESS=""
+        VED_GUEST_SYSTEM_BUS_PID=""
+        VED_GUEST_LOGIN1_STUB_PID=""
+        VED_UTS_NAMESPACE_OK=0
     fi
 
     return 0

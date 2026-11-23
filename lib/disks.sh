@@ -301,6 +301,240 @@ mount_path() {
     cleanup_add_mount "$target"
 }
 
+
+
+mount_linux_root() {
+    local source="$1"
+    local target="$2"
+    local options="${3:-rw}"
+    local fstype
+    local probe
+    local subvolumes
+    local line
+    local id
+    local path
+    local label
+    local option
+    local selected_id=""
+    local selected_path=""
+    local index
+
+    local fs_spec
+    local fs_file
+    local fs_type
+    local fs_options
+    local fs_freq
+    local fs_pass
+    local fs_device
+    local source_device
+    local mount_target
+    local mount_options
+    local mount_option
+    local subvol_option
+    local decoded_mountpoint
+
+    local -a ids=()
+    local -a paths=()
+    local -a labels=()
+    local -a mount_option_array=()
+
+    fstype="$(lsblk -nrpo FSTYPE "$source" 2>/dev/null | head -n1 || true)"
+
+    # Preserve existing behaviour for non-Btrfs filesystems.
+    if [[ "${fstype,,}" != "btrfs" ]]; then
+        mount_path "$source" "$target" "$options"
+        return
+    fi
+
+    have btrfs || die "Btrfs filesystem detected, but btrfs-progs is missing."
+
+    probe="${target}.btrfs-probe"
+
+    mkdir -p "$probe"
+    cleanup_add_dir "$probe"
+    umount_path "$probe"
+
+    info "Inspecting Btrfs subvolumes..."
+
+    # Mount Btrfs top-level filesystem read-only.
+    if ! mount -t btrfs -o ro,subvolid=5 "$source" "$probe"; then
+        die "Cannot inspect Btrfs top-level filesystem: $source"
+    fi
+
+    cleanup_add_mount "$probe"
+
+    # Consider the top-level filesystem itself.
+    if [[ -f "$probe/etc/os-release" ]]; then
+        ids+=(5)
+        paths+=("/")
+        label="$(sed -n 's/^PRETTY_NAME=//p' "$probe/etc/os-release" |
+            head -n1 | sed 's/^"//;s/"$//')"
+        labels+=("${label:-Btrfs root filesystem}")
+    fi
+
+    # Find subvolumes containing Linux installations.
+    if ! subvolumes="$(btrfs subvolume list "$probe" 2>/dev/null)"; then
+        umount_path "$probe"
+        die "Unable to enumerate Btrfs subvolumes."
+    fi
+
+    while IFS= read -r line; do
+        [[ "$line" == *" path "* ]] || continue
+
+        id="$(awk '{print $2}' <<< "$line")"
+        path="${line#* path }"
+
+        [[ "$id" =~ ^[0-9]+$ ]] || continue
+        [[ -f "$probe/$path/etc/os-release" ]] || continue
+
+        label="$(sed -n 's/^PRETTY_NAME=//p' \
+            "$probe/$path/etc/os-release" |
+            head -n1 | sed 's/^"//;s/"$//')"
+
+        ids+=("$id")
+        paths+=("$path")
+        labels+=("${label:-Linux installation}")
+    done <<< "$subvolumes"
+
+    umount_path "$probe"
+
+    if ((${#ids[@]} == 0)); then
+        die "No Linux installation with /etc/os-release was found in Btrfs filesystem: $source"
+    fi
+
+    # Automatically select a single installation.
+    if ((${#ids[@]} == 1)); then
+        selected_id="${ids[0]}"
+        selected_path="${paths[0]}"
+        info "Detected Linux installation: ${labels[0]} (${paths[0]})"
+    else
+        echo
+        info "Multiple Linux installations found in Btrfs:"
+        echo
+
+        for index in "${!ids[@]}"; do
+            printf '  %d) %s - subvolume %s (ID %s)\n' \
+                "$((index + 1))" \
+                "${labels[$index]}" \
+                "${paths[$index]}" \
+                "${ids[$index]}"
+        done
+
+        echo
+
+        while true; do
+            option="$(ask "Select the Linux installation" "1")"
+
+            if [[ "$option" =~ ^[0-9]+$ ]] &&
+                ((option >= 1 && option <= ${#ids[@]})); then
+                selected_id="${ids[$((option - 1))]}"
+                selected_path="${paths[$((option - 1))]}"
+                break
+            fi
+
+            warn "$(t invalid_selection)"
+        done
+    fi
+
+    info "Mounting Btrfs root subvolume (ID $selected_id)..."
+
+    mount_path "$source" "$target" "$options,subvolid=$selected_id"
+
+    # Resolve the actual source device for safe fstab filtering.
+    source_device="$(readlink -f "$source" 2>/dev/null || printf '%s' "$source")"
+
+    # Additional Btrfs subvolumes are mounted from the guest fstab.
+    if [[ ! -r "$target/etc/fstab" ]]; then
+        warn "Guest /etc/fstab is missing or unreadable; additional subvolumes will not be mounted."
+        return
+    fi
+
+    info "Inspecting additional Btrfs mounts in guest /etc/fstab..."
+
+    while read -r fs_spec fs_file fs_type fs_options fs_freq fs_pass; do
+        [[ -n "$fs_spec" ]] || continue
+        [[ "$fs_spec" != \#* ]] || continue
+        [[ "${fs_type,,}" == "btrfs" ]] || continue
+        [[ "$fs_file" == /* ]] || continue
+
+        # Decode standard fstab escaped characters.
+        decoded_mountpoint="${fs_file//\\040/ }"
+        decoded_mountpoint="${decoded_mountpoint//\\011/$'\t'}"
+        decoded_mountpoint="${decoded_mountpoint//\\134/\\}"
+
+        # Never remount the guest root.
+        [[ "$decoded_mountpoint" != "/" ]] || continue
+
+        # Reject unsafe mount paths.
+        case "/$decoded_mountpoint/" in
+            */../*|*/./*)
+                warn "Ignoring unsafe fstab mountpoint: $fs_file"
+                continue
+                ;;
+        esac
+
+        # Only accept entries referring to the selected filesystem.
+        fs_device="$(findfs "$fs_spec" 2>/dev/null || true)"
+
+        [[ -n "$fs_device" && -b "$fs_device" ]] || continue
+
+        fs_device="$(readlink -f "$fs_device" 2>/dev/null || printf '%s' "$fs_device")"
+
+        [[ "$fs_device" == "$source_device" ]] || continue
+
+        # Only mount entries explicitly identifying a Btrfs subvolume.
+        subvol_option=""
+        mount_options=""
+
+        IFS=',' read -ra mount_option_array <<< "$fs_options"
+
+        for mount_option in "${mount_option_array[@]}"; do
+            case "$mount_option" in
+                subvol=*|subvolid=*)
+                    subvol_option="$mount_option"
+                    ;;
+                x-systemd.*|nofail|noauto|comment=*)
+                    ;;
+                '')
+                    ;;
+                *)
+                    if [[ -n "$mount_options" ]]; then
+                        mount_options+=","
+                    fi
+                    mount_options+="$mount_option"
+                    ;;
+            esac
+        done
+
+        [[ -n "$subvol_option" ]] || continue
+
+        # Build the mountpoint inside the guest root.
+        mount_target="$target$decoded_mountpoint"
+
+        mkdir -p "$mount_target"
+
+        if mountpoint -q "$mount_target" 2>/dev/null; then
+            continue
+        fi
+
+        [[ -n "$mount_options" ]] || mount_options="$options"
+
+        info "Mounting Btrfs subvolume: $subvol_option -> $decoded_mountpoint"
+
+        if ! mount -t btrfs \
+            -o "$mount_options,$subvol_option" \
+            "$source" "$mount_target"; then
+            die "Failed to mount Btrfs subvolume $subvol_option at $decoded_mountpoint"
+        fi
+
+        cleanup_add_mount "$mount_target"
+
+    done < "$target/etc/fstab"
+
+    info "Btrfs root and additional subvolumes mounted successfully."
+}
+
+
 umount_path() {
     local target="$1"
     if mountpoint -q "$target" 2>/dev/null; then

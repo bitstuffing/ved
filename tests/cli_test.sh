@@ -186,7 +186,9 @@ run_locale_messages() (
 
     check_keys() {
         local key
-        for key in backend_powershell shell_user_invalid windows_temp_failed; do
+        for key in backend_powershell shell_user_invalid windows_temp_failed \
+                   memlock_raise_failed guest_fips_mask_failed \
+                   login1_stub_failed; do
             [[ "$(t "$key")" != "$key" ]]
         done
     }
@@ -215,6 +217,333 @@ run_cli_parsing() (
     [[ "$VED_SHELL" == "pwsh" ]]
     [[ "$VED_WINDOWS_DRIVE" == "Z" ]]
     [[ "$VED_WINDOWS_WRITE" -eq 0 ]]
+)
+
+run_session_helpers() (
+    # shellcheck source=../lib/core.sh
+    source "$PROJECT_ROOT/lib/core.sh"
+    # shellcheck source=../lib/session.sh
+    source "$PROJECT_ROOT/lib/session.sh"
+
+    t() {
+        local key="$1"
+        shift
+        printf '%s' "$key"
+    }
+
+    # select_desktop_session() prompts when stdin is a TTY; this unit-style
+    # helper loads session.sh without the CLI, so provide the missing input.
+    ask() {
+        printf '3\n'
+    }
+
+    local root="$TMPDIR_TEST/session-root"
+    mkdir -p "$root/usr/share/wayland-sessions" \
+        "$root/usr/share/xsessions" \
+        "$root/usr/bin" \
+        "$root/usr/libexec"
+
+    cat >"$root/usr/share/wayland-sessions/gnome.desktop" <<'EOF'
+[Desktop Entry]
+Name=GNOME
+Exec=gnome-session
+TryExec=gnome-session
+DesktopNames=GNOME
+EOF
+    cat >"$root/usr/share/xsessions/gnome-xorg.desktop" <<'EOF'
+[Desktop Entry]
+Name=GNOME on Xorg
+Exec=gnome-session --session=gnome-xorg %f
+TryExec=gnome-session
+EOF
+    cat >"$root/usr/share/xsessions/xfce.desktop" <<'EOF'
+[Desktop Entry]
+Name=Xfce
+Exec=startxfce4
+DesktopNames=XFCE
+EOF
+    cat >"$root/usr/share/xsessions/hidden.desktop" <<'EOF'
+[Desktop Entry]
+Name=Hidden
+Exec=hidden-session
+Hidden=true
+EOF
+    : >"$root/usr/bin/gnome-session"
+    : >"$root/usr/bin/dbus-run-session"
+    : >"$root/usr/bin/gnome-shell"
+    : >"$root/usr/libexec/mutter-devkit"
+    chmod +x "$root/usr/bin/gnome-session" \
+        "$root/usr/bin/dbus-run-session" \
+        "$root/usr/bin/gnome-shell" \
+        "$root/usr/libexec/mutter-devkit"
+
+    local -a sessions=()
+    mapfile -t sessions < <(detect_desktop_sessions "$root")
+    [[ ${#sessions[@]} -eq 3 ]]
+    [[ "${sessions[0]}" == *'|wayland' ]]
+    [[ "${sessions[1]}" == *'gnome-session --session=gnome-xorg|'* ]]
+    [[ "${sessions[2]}" == 'Xfce|startxfce4|xsessions/xfce.desktop|x11' ]]
+
+    # A GNOME 49 guest must never offer its leftover X11 session.
+    VED_SESSION=desktop
+    VED_COMMAND=""
+    VED_GUI_TARGET=nested
+    VED_GUEST_NO_X11=1
+    VED_GUEST_SESSION_TYPE=""
+    select_desktop_session "$root"
+    [[ "$VED_COMMAND" == "startxfce4" ]]
+    [[ "$VED_GUEST_SESSION_TYPE" == "x11" ]]
+    [[ "$VED_GUEST_SESSION_DESKTOP" == "xfce" ]]
+    [[ "$VED_GUEST_CURRENT_DESKTOP" == "XFCE" ]]
+
+    set_guest_desktop_identity 'ubuntu:GNOME'
+    [[ "$VED_GUEST_SESSION_DESKTOP" == "ubuntu" ]]
+    [[ "$VED_GUEST_CURRENT_DESKTOP" == "ubuntu:GNOME" ]]
+
+    VED_BACKEND=chroot
+    VED_GUEST_RUNTIME=""
+    [[ "$(session_build_command "$root")" == "dbus-run-session -- startxfce4" ]]
+
+    # An already wrapped command must not get a second session bus.
+    VED_COMMAND="dbus-run-session -- startxfce4"
+    [[ "$(session_build_command "$root")" == "dbus-run-session -- startxfce4" ]]
+
+    # GNOME 49 uses the devkit path and forces the host display.
+    chroot() {
+        printf 'GNOME Shell 49.1\n'
+    }
+    VED_COMMAND=""
+    VED_GUI_TARGET=nested
+    session_probe_guest "$root"
+    [[ "$VED_GUEST_GNOME_MAJOR" == "49" ]]
+    [[ "$VED_GUEST_NO_X11" -eq 1 ]]
+    [[ "$VED_GUEST_DEVKIT_OK" -eq 1 ]]
+    [[ "$VED_GUI_TARGET" == "host" ]]
+    [[ "$VED_COMMAND" == *'gnome-shell --devkit --wayland'* ]]
+    [[ "$VED_GUEST_SESSION_TYPE" == "wayland" ]]
+    [[ "$VED_GUEST_SESSION_DESKTOP" == "gnome" ]]
+    [[ "$VED_GUEST_CURRENT_DESKTOP" == "GNOME" ]]
+
+    local built
+    built="$(session_build_command "$root")"
+    [[ "$built" == dbus-run-session\ --\ gnome-shell\ --devkit* ]]
+    [[ "$built" != *'dbus-run-session -- dbus-run-session'* ]]
+
+    # Without devkit the broken X11 session is filtered out instead of
+    # leaving the user with a black screen.
+    rm -f "$root/usr/libexec/mutter-devkit"
+    VED_COMMAND=""
+    VED_GUI_TARGET=host
+    session_probe_guest "$root"
+    [[ "$VED_GUEST_NO_X11" -eq 1 ]]
+    [[ -z "$VED_COMMAND" ]]
+    if select_desktop_session "$root"; then
+        [[ "$VED_COMMAND" != *gnome* ]]
+    fi
+)
+
+run_chroot_identity_helpers() (
+    # shellcheck source=../lib/core.sh
+    source "$PROJECT_ROOT/lib/core.sh"
+    # shellcheck source=../lib/session.sh
+    source "$PROJECT_ROOT/lib/session.sh"
+    # shellcheck source=../lib/backends/chroot.sh
+    source "$PROJECT_ROOT/lib/backends/chroot.sh"
+    # shellcheck source=../lib/backends/nspawn.sh
+    source "$PROJECT_ROOT/lib/backends/nspawn.sh"
+
+    t() {
+        local key="$1"
+        printf '%s' "$key"
+    }
+
+    local root="$TMPDIR_TEST/identity-root"
+    mkdir -p "$root/etc" "$root/usr/bin" "$root/bin"
+    printf 'bbm-Precision-5770\n' > "$root/etc/hostname"
+    printf 'root:x:0:0:root:/root:/bin/sh\n' > "$root/etc/passwd"
+    : > "$root/usr/bin/env"
+    : > "$root/bin/sh"
+    chmod +x "$root/usr/bin/env" "$root/bin/sh"
+
+    [[ "$(guest_hostname "$root")" == "bbm-Precision-5770" ]]
+
+    VED_GRAPHICAL=1
+    VED_DRY_RUN=1
+    VED_GUEST_RUNTIME="/run/user/1000"
+    VED_GUI_TARGET="host"
+    VED_SESSION="desktop"
+    VED_GUEST_SYSTEM_BUS_ADDRESS="unix:path=/run/dbus/system_bus_socket"
+    VED_GUEST_SESSION_DESKTOP="gnome"
+    VED_GUEST_CURRENT_DESKTOP="ubuntu:GNOME"
+    XDG_SESSION_DESKTOP="hostsession"
+    XDG_CURRENT_DESKTOP="HostDesktop"
+    HOSTNAME="bitbara"
+
+    have() {
+        case "$1" in
+            unshare|hostname) return 0 ;;
+            *) command -v "$1" >/dev/null 2>&1 ;;
+        esac
+    }
+
+    local output
+    output="$(chroot_run "$root" "root" "startxfce4")"
+    [[ "$output" == *"unshare --uts"* ]]
+    [[ "$output" == *"sh bbm-Precision-5770 guest_hostname_set_failed"* ]]
+    [[ "$output" == *"HOSTNAME=bbm-Precision-5770"* ]]
+    [[ "$output" == *"XDG_SESSION_DESKTOP=gnome"* ]]
+    [[ "$output" == *"XDG_CURRENT_DESKTOP=ubuntu:GNOME"* ]]
+    [[ "$output" == *"DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket"* ]]
+    [[ "$output" != *"XDG_SESSION_DESKTOP=hostsession"* ]]
+    [[ "$output" != *"XDG_CURRENT_DESKTOP=HostDesktop"* ]]
+    [[ "$output" != *"HOSTNAME=bitbara"* ]]
+
+    # Without unshare the desktop still starts; it just keeps host identity.
+    have() { return 1; }
+    output="$(chroot_run "$root" "root" "startxfce4")"
+    [[ "$output" != *"unshare --uts"* ]]
+    [[ "$output" == *"XDG_SESSION_DESKTOP=gnome"* ]]
+
+    # nspawn gets the same guest hostname and desktop identity.
+    VED_BOOT=0
+    VED_DISK="/dev/nvme0n1p2"
+    nspawn_build_args "$root" "root" "startxfce4"
+    local joined=" ${NSPAWN_ARGS[*]} "
+    [[ "$joined" == *" --hostname=bbm-Precision-5770 "* ]]
+    [[ "$joined" == *" --setenv=HOSTNAME=bbm-Precision-5770 "* ]]
+    [[ "$joined" == *" --setenv=XDG_SESSION_DESKTOP=gnome "* ]]
+    [[ "$joined" == *" --setenv=XDG_CURRENT_DESKTOP=ubuntu:GNOME "* ]]
+    [[ "$joined" != *" --setenv=XDG_CURRENT_DESKTOP=HostDesktop "* ]]
+)
+
+run_chroot_system_bus_config() (
+    # shellcheck source=../lib/core.sh
+    source "$PROJECT_ROOT/lib/core.sh"
+    # shellcheck source=../lib/session.sh
+    source "$PROJECT_ROOT/lib/session.sh"
+    # shellcheck source=../lib/backends/chroot.sh
+    source "$PROJECT_ROOT/lib/backends/chroot.sh"
+
+    t() { printf '%s' "$1"; }
+
+    VED_GRAPHICAL=1
+    VED_DRY_RUN=0
+    VED_RUN_DIR="$TMPDIR_TEST/bus-run"
+    mkdir -p "$VED_RUN_DIR"
+    local root="$TMPDIR_TEST/bus-root"
+    mkdir -p "$root"
+    local binds="$TMPDIR_TEST/bus-binds"
+    : > "$binds"
+
+    chroot_bind() {
+        printf '%s|%s\n' "$1" "$2" >> "$binds"
+        return 0
+    }
+    chroot_start_system_bus() { return 0; }
+
+    chroot_prepare_mounts "$root"
+    grep -Fq "$VED_RUN_DIR/guest-dbus|$root/run/dbus" "$binds"
+    ! grep -Fq '/run/dbus|' "$binds"
+    grep -Fq "/dev/null|$root/etc/gcrypt/fips_enabled" "$binds"
+    [[ "$VED_GUEST_SYSTEM_BUS_ADDRESS" == "unix:path=/run/dbus/system_bus_socket" ]]
+)
+
+run_fips_mask_helper() (
+    # shellcheck source=../lib/core.sh
+    source "$PROJECT_ROOT/lib/core.sh"
+    t() { printf '%s' "$1"; }
+
+    local root="$TMPDIR_TEST/fips-root"
+    mkdir -p "$root/etc"
+    local masked
+    masked="$(prepare_guest_nonfips_config "$root")"
+    [[ "$masked" == "$root/etc/gcrypt/fips_enabled" ]]
+    [[ -f "$masked" ]]
+)
+
+run_nspawn_graphical_hardening() (
+    # shellcheck source=../lib/core.sh
+    source "$PROJECT_ROOT/lib/core.sh"
+    # shellcheck source=../lib/session.sh
+    source "$PROJECT_ROOT/lib/session.sh"
+    # shellcheck source=../lib/backends/chroot.sh
+    source "$PROJECT_ROOT/lib/backends/chroot.sh"
+    # shellcheck source=../lib/backends/nspawn.sh
+    source "$PROJECT_ROOT/lib/backends/nspawn.sh"
+
+    t() { printf '%s' "$1"; }
+
+    local root="$TMPDIR_TEST/nspawn-hardening-root"
+    mkdir -p "$root/etc" "$root/usr/bin" "$root/bin"
+    printf 'bbm-Precision-5770\n' > "$root/etc/hostname"
+    printf 'root:x:0:0:root:/root:/bin/sh\n' > "$root/etc/passwd"
+    : > "$root/usr/bin/env"
+    : > "$root/bin/sh"
+    chmod +x "$root/usr/bin/env" "$root/bin/sh"
+
+    VED_GRAPHICAL=1
+    VED_BOOT=0
+    VED_DRY_RUN=1
+    VED_DISK="/dev/nvme0n1p2"
+    VED_RUN_DIR="$TMPDIR_TEST/nspawn-run"
+    VED_GUEST_RUNTIME="/run/user/1000"
+
+    prepare_guest_nonfips_config "$root" >/dev/null
+    nspawn_prepare_graphical_bus "$root"
+    [[ "$VED_NSPAWN_GUEST_BUS_DIR" == "$VED_RUN_DIR/nspawn-guest-dbus" ]]
+    nspawn_build_args "$root" "root" 'dbus-run-session -- gnome-shell'
+    local joined=" ${NSPAWN_ARGS[*]} "
+    [[ "$joined" == *" --rlimit=MEMLOCK=infinity "* ]]
+    [[ "$joined" == *" --bind=$VED_RUN_DIR/nspawn-guest-dbus:/run/dbus "* ]]
+    [[ "$joined" == *" --bind-ro=/dev/null:/etc/gcrypt/fips_enabled "* ]]
+    [[ "$joined" == *" -u LIBGCRYPT_FORCE_FIPS_MODE "* ]]
+    [[ "$joined" == *" --setenv=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket "* ]]
+    [[ "$joined" != *" --bind=/run/dbus "* ]]
+)
+
+run_memlock_helper() (
+    # shellcheck source=../lib/core.sh
+    source "$PROJECT_ROOT/lib/core.sh"
+    t() { printf '%s' "$1"; }
+
+    local prlimit_calls=0
+    prlimit() {
+        ((prlimit_calls += 1))
+        return 0
+    }
+    have() { [[ "$1" == prlimit ]]; }
+    ulimit() {
+        case "$1" in
+            -Sl|-Hl) printf '1024' ;;
+            *) return 0 ;;
+        esac
+    }
+
+    VED_GRAPHICAL=0
+    raise_graphical_memlock_limit
+    [[ "$prlimit_calls" -eq 0 ]]
+
+    VED_GRAPHICAL=1
+    raise_graphical_memlock_limit
+    [[ "$prlimit_calls" -eq 1 ]]
+)
+
+run_login1_stub_generator() (
+    command -v python3 >/dev/null 2>&1 || return 0
+
+    local script="$TMPDIR_TEST/ved-login1-stub.py"
+    awk '/^    cat > "\$stub_host" <<.PY.$/{flag=1;next}
+         flag && /^PY$/{exit}
+         flag' "$PROJECT_ROOT/lib/backends/chroot.sh" > "$script"
+
+    [[ -s "$script" ]]
+    python3 -m py_compile "$script"
+    grep -Fq 'VED_LOGIN1_READY' "$script"
+    grep -Fq 'VED_LOGIN1_MACHINE_ID' "$script"
+    grep -Fq 'org.freedesktop.login1.Manager' "$script"
+    grep -Fq 'org.gnome.DisplayManager.Manager' "$script"
+    grep -Fq 'CanSuspend' "$script"
+    grep -Fq 'RegisterSession' "$script"
 )
 
 run_ved() {
@@ -300,6 +629,48 @@ if run_cli_parsing; then
     pass 'CLI option normalization'
 else
     fail 'CLI option normalization'
+fi
+
+if run_session_helpers; then
+    pass 'desktop session helpers'
+else
+    fail 'desktop session helpers'
+fi
+
+if run_chroot_identity_helpers; then
+    pass 'chroot guest identity helpers'
+else
+    fail 'chroot guest identity helpers'
+fi
+
+if run_chroot_system_bus_config; then
+    pass 'chroot private system bus configuration'
+else
+    fail 'chroot private system bus configuration'
+fi
+
+if run_login1_stub_generator; then
+    pass 'chroot login1 stub generator'
+else
+    fail 'chroot login1 stub generator'
+fi
+
+if run_memlock_helper; then
+    pass 'graphical memlock limit helper'
+else
+    fail 'graphical memlock limit helper'
+fi
+
+if run_fips_mask_helper; then
+    pass 'guest libgcrypt FIPS mask helper'
+else
+    fail 'guest libgcrypt FIPS mask helper'
+fi
+
+if run_nspawn_graphical_hardening; then
+    pass 'graphical nspawn bus, memlock and FIPS hardening'
+else
+    fail 'graphical nspawn bus, memlock and FIPS hardening'
 fi
 
 if ((failed)); then

@@ -2,6 +2,84 @@ session_is_graphical() {
     [[ "$VED_SESSION" == "app" || "$VED_SESSION" == "desktop" ]]
 }
 
+# XDG_CURRENT_DESKTOP is a colon-separated list; .desktop files use
+# DesktopNames with semicolons. Never fall back to the host's values here:
+# that makes guest applications see the host desktop (and breaks apps such as
+# MSEdge which select integrations from these variables).
+set_guest_desktop_identity() {
+    local names="$1"
+    local part
+    local -a parts=()
+    local -a cleaned=()
+
+    [[ -n "$names" ]] || return 1
+
+    IFS=':;' read -r -a parts <<< "$names"
+    for part in "${parts[@]}"; do
+        part="${part//[[:space:]]/}"
+        [[ -n "$part" ]] && cleaned+=("$part")
+    done
+    ((${#cleaned[@]} > 0)) || return 1
+
+    printf -v VED_GUEST_CURRENT_DESKTOP '%s:' "${cleaned[@]}"
+    VED_GUEST_CURRENT_DESKTOP="${VED_GUEST_CURRENT_DESKTOP%:}"
+    VED_GUEST_SESSION_DESKTOP="${cleaned[0],,}"
+
+    return 0
+}
+
+guest_desktop_identity_for_file() {
+    local root="$1"
+    local id="$2"
+    local file names name base
+
+    [[ -n "$id" ]] || return 1
+    file="$root/usr/share/$id"
+    [[ -r "$file" ]] || return 1
+
+    names="$(sed -n 's/^DesktopNames=//p' "$file" | head -n1 || true)"
+    names="${names//|/}"
+    names="${names//$'\r'/}"
+    names="$(printf '%s' "$names" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    if set_guest_desktop_identity "$names"; then
+        return 0
+    fi
+
+    # Older/fallback .desktop files may omit DesktopNames. Use a readable
+    # name first ("GNOME on Xorg" -> GNOME), then the file basename.
+    name="$(sed -n 's/^Name=//p' "$file" | head -n1 || true)"
+    name="${name%% on *}"
+    name="${name%% *}"
+    base="${id##*/}"
+    base="${base%.desktop}"
+    set_guest_desktop_identity "${name:-$base}"
+}
+
+guest_desktop_identity_for_command() {
+    local command="${1,,}"
+
+    case "$command" in
+        *gnome-session*|*gnome-shell*) set_guest_desktop_identity 'GNOME' ;;
+        *startplasma*|*plasma*) set_guest_desktop_identity 'KDE' ;;
+        *startxfce4*) set_guest_desktop_identity 'XFCE' ;;
+        *cinnamon-session*) set_guest_desktop_identity 'X-Cinnamon' ;;
+        *mate-session*) set_guest_desktop_identity 'MATE' ;;
+        *lxqt-session*) set_guest_desktop_identity 'LXQt' ;;
+        *lxsession*) set_guest_desktop_identity 'LXDE' ;;
+        *) return 1 ;;
+    esac
+}
+
+ensure_guest_desktop_identity() {
+    local command="$1"
+
+    [[ "$VED_SESSION" == "desktop" ]] || return 0
+    [[ -z "$VED_GUEST_CURRENT_DESKTOP" ]] || return 0
+    [[ -n "$command" ]] || return 0
+
+    guest_desktop_identity_for_command "$command" || true
+}
+
 select_session() {
     local option
 
@@ -145,6 +223,7 @@ prepare_graphical_runtime() {
 
     # The host Wayland compositor socket is only needed when drawing on the
     # host display. With Xephyr, DISPLAY points at the nested X server instead.
+    VED_WAYLAND_EXPORT_FAILED=0
     if [[ "$VED_GUI_TARGET" != "nested" && -n "${WAYLAND_DISPLAY:-}" ]]; then
         wayland_source="$VED_GUI_RUNTIME/$WAYLAND_DISPLAY"
         if [[ "$WAYLAND_DISPLAY" == /* ]]; then
@@ -154,72 +233,224 @@ prepare_graphical_runtime() {
             gui_runtime_export_socket "$wayland_source" \
                 "$runtime/${wayland_source##*/}"; then
             VED_GUEST_WAYLAND_DISPLAY="${wayland_source##*/}"
-        elif [[ "$VED_GUI_SESSION_TYPE" == "wayland" ]]; then
-            # No wayland socket: fall back to the host's XWayland/X11 socket.
-            VED_GUI_SESSION_TYPE="x11"
+        else
+            # Do not pass the host's socket *name* to the guest when the
+            # socket itself could not be exported: it does not exist in the
+            # private runtime dir and compositors report a broken Wayland
+            # socket. Fall back to X11 (except for the self-contained devkit
+            # path, which creates its own display).
+            VED_WAYLAND_EXPORT_FAILED=1
+            VED_GUEST_WAYLAND_DISPLAY=""
+            warn "$(t wayland_socket_unavailable)"
+            if [[ "$VED_GUI_SESSION_TYPE" == "wayland" ]]; then
+                VED_GUI_SESSION_TYPE="x11"
+            fi
+            if [[ "$VED_COMMAND" != *--devkit* &&
+                  "$VED_GUEST_SESSION_TYPE" == "wayland" ]]; then
+                VED_GUEST_SESSION_TYPE="x11"
+            fi
         fi
     fi
 }
 
-detect_desktop_session() {
+detect_desktop_sessions() {
     local root="$1"
-    local candidate
-    local -a candidates=(
-        startplasma-x11 startplasma-wayland
-        gnome-session gnome-xorg
-        startxfce4 xfce4-session
-        mate-session cinnamon-session
-        lxqt-session startlxde lxsession
-        budgie-desktop
-        sway i3 openbox-session
-    )
+    local directory
+    local directory_type
+    local file
+    local name
+    local exec
+    local try_exec
+    local id
+    local -A seen=()
 
-    for candidate in "${candidates[@]}"; do
-        if [[ -x "$root/usr/bin/$candidate" || -x "$root/bin/$candidate" ]]; then
-            printf '%s' "$candidate"
-            return 0
+    for directory in \
+        "$root/usr/share/wayland-sessions" \
+        "$root/usr/share/xsessions"; do
+
+        if [[ "$directory" == */wayland-sessions ]]; then
+            directory_type="wayland"
+        else
+            directory_type="x11"
         fi
+
+        [[ -d "$directory" ]] || continue
+
+        for file in "$directory"/*.desktop; do
+            [[ -f "$file" ]] || continue
+
+            name="$(sed -n 's/^Name=//p' "$file" | head -n1)"
+            exec="$(sed -n 's/^Exec=//p' "$file" | head -n1)"
+            try_exec="$(sed -n 's/^TryExec=//p' "$file" | head -n1)"
+
+            [[ -n "$name" && -n "$exec" ]] || continue
+
+            grep -qiE '^(Hidden|NoDisplay)=true$' "$file" && continue
+
+            if [[ -n "$try_exec" ]]; then
+                if [[ ! -x "$root$try_exec" &&
+                      ! -x "$root/usr/bin/$try_exec" &&
+                      ! -x "$root/usr/sbin/$try_exec" ]]; then
+                    continue
+                fi
+            fi
+
+            # Field codes make no sense when a session is launched directly.
+            exec="$(printf '%s' "$exec" |
+                sed -E 's/[[:space:]]+%[a-zA-Z]+//g; s/[[:space:]]+$//')"
+            [[ -n "$exec" ]] || continue
+
+            id="${directory##*/}/$(basename "$file")"
+
+            [[ -n "${seen[$id]:-}" ]] && continue
+            seen["$id"]=1
+
+            printf '%s|%s|%s|%s\n' \
+                "$name" "$exec" "$id" "$directory_type"
+        done
     done
-    return 1
+}
+
+# Only offer sessions that can actually work with the requested display
+# target. Xephyr is X11 only, a Wayland session needs a compositor socket and
+# GNOME >= 49 has no working X11 session at all.
+desktop_session_supported() {
+    local entry="$1"
+    local name exec id type
+
+    IFS='|' read -r name exec id type <<< "$entry"
+
+    case "$type" in
+        wayland|x11) ;;
+        *) return 1 ;;
+    esac
+
+    if [[ "$VED_GUI_TARGET" == "nested" && "$type" != "x11" ]]; then
+        return 1
+    fi
+
+    if [[ "$type" == "x11" && "${VED_GUEST_NO_X11:-0}" -eq 1 ]]; then
+        case "${name,,} ${exec,,} ${id,,}" in
+            *gnome*) return 1 ;;
+        esac
+    fi
+
+    if [[ "$type" == "wayland" && "$VED_GUI_TARGET" != "nested" &&
+          -z "${WAYLAND_DISPLAY:-}" &&
+          -z "${VED_GUEST_WAYLAND_DISPLAY:-}" ]]; then
+        return 1
+    fi
+
+    return 0
+}
+
+select_desktop_session() {
+    local root="$1"
+    local -a sessions=()
+    local -a supported=()
+    local entry
+    local option
+    local i
+    local name exec id type
+
+    [[ "$VED_SESSION" == "desktop" ]] || return 0
+    [[ -z "$VED_COMMAND" ]] || return 0
+
+    mapfile -t sessions < <(detect_desktop_sessions "$root")
+
+    for entry in "${sessions[@]}"; do
+        desktop_session_supported "$entry" && supported+=("$entry")
+    done
+
+    if ((${#supported[@]} == 0)); then
+        if ((${#sessions[@]} > 0)); then
+            warn "$(t desktop_session_incompatible)"
+        fi
+        return 1
+    fi
+
+    if ((${#supported[@]} == 1)); then
+        entry="${supported[0]}"
+    elif [[ ! -t 0 ]]; then
+        return 1
+    else
+        echo
+        info "$(t desktop_sessions_available)"
+        echo
+
+        for i in "${!supported[@]}"; do
+            entry="${supported[$i]}"
+            printf '  %d) %s\n' "$((i + 1))" "${entry%%|*}"
+        done
+
+        echo
+        option="$(ask "$(t desktop_session_prompt)" "1")"
+
+        [[ "$option" =~ ^[0-9]+$ ]] || return 1
+        (( option >= 1 && option <= ${#supported[@]} )) || return 1
+
+        entry="${supported[$((option - 1))]}"
+    fi
+
+    IFS='|' read -r name exec id type <<< "$entry"
+    VED_COMMAND="$exec"
+    VED_GUEST_SESSION_TYPE="$type"
+    guest_desktop_identity_for_file "$root" "$id" || true
+
+    return 0
 }
 
 session_build_command() {
     local root="$1"
-    local command=""
+    local command="$VED_COMMAND"
     local user_manager=""
 
     case "$VED_SESSION" in
         desktop)
-            command="$VED_COMMAND"
             if [[ -z "$command" ]]; then
-                command="$(detect_desktop_session "$root" || true)"
-            fi
-            if [[ -z "$command" ]]; then
-                return 1
+                select_desktop_session "$root" || return 1
+                command="$VED_COMMAND"
             fi
 
-            # systemd-run --user only works when a systemd *user* manager is
-            # running inside the container. A container started without
-            # --boot has no PID 1 and therefore no user manager; the only
-            # systemd socket visible there would be the host's, which cannot
-            # launch guest binaries.
+            [[ -n "$command" ]] || return 1
+
+            # Do not wrap a command that already owns its session bus.
+            case "$command" in
+                dbus-run-session[[:space:]]--*|systemd-run[[:space:]]*)
+                    printf '%s' "$command"
+                    return 0
+                    ;;
+            esac
+
+            # systemd-run --user only when a systemd *user* manager is
+            # running inside the container.
             if [[ -n "${VED_GUEST_RUNTIME:-}" ]]; then
                 user_manager="$root$VED_GUEST_RUNTIME/systemd/private"
             fi
 
-            if [[ "$VED_BACKEND" == "nspawn" && -S "$user_manager" &&
-                ( -x "$root/usr/bin/systemd-run" || -x "$root/bin/systemd-run" ) ]]; then
+            if [[ "$VED_BACKEND" == "nspawn" &&
+                  "$command" != *--devkit* &&
+                  -S "$user_manager" &&
+                  ( -x "$root/usr/bin/systemd-run" ||
+                    -x "$root/bin/systemd-run" ) ]]; then
+
                 command="systemd-run --user --scope -- $command"
-            elif [[ -x "$root/usr/bin/dbus-run-session" || -x "$root/bin/dbus-run-session" ]]; then
+
+            elif [[ "$command" != *plasma-dbus-run-session-if-needed* &&
+                   ( -x "$root/usr/bin/dbus-run-session" ||
+                     -x "$root/bin/dbus-run-session" ) ]]; then
+
                 command="dbus-run-session -- $command"
             fi
-            ;;
-        *)
-            command="$VED_COMMAND"
             ;;
     esac
 
     printf '%s' "$command"
+}
+
+session_build_command_ex() {
+    local root="$1"
+    session_build_command "$root"
 }
 
 guest_display_value() {
@@ -293,6 +524,32 @@ detect_gnome_major() {
     local root="${1:-$VED_CHROOT_DIR}"
     local out major
 
+    # Prefer package metadata. Executing a guest binary with chroot() at this
+    # point is fragile (/dev, /proc and /sys are not bound yet), and a silent
+    # failure here would let a GNOME 49+ guest fall back to its broken X11
+    # session.
+    if have rpm; then
+        out="$(rpm --root "$root" -q --qf '%{VERSION}\n' gnome-shell 2>/dev/null |
+            head -n1 || true)"
+        out="${out#*:}"   # drop an epoch such as "1:49.0"
+        major="$(grep -oE '[0-9]+' <<< "$out" | head -n1 || true)"
+        [[ -n "$major" ]] && {
+            printf '%s' "$major"
+            return 0
+        }
+    fi
+
+    if have dpkg-query; then
+        out="$(dpkg-query --root="$root" -W -f='${Version}\n' gnome-shell 2>/dev/null |
+            head -n1 || true)"
+        out="${out#*:}"
+        major="$(grep -oE '[0-9]+' <<< "$out" | head -n1 || true)"
+        [[ -n "$major" ]] && {
+            printf '%s' "$major"
+            return 0
+        }
+    fi
+
     [[ -x "$root/usr/bin/gnome-shell" ]] || return 1
     out="$(timeout 10 chroot "$root" /usr/bin/gnome-shell --version 2>/dev/null)" ||
         return 1
@@ -310,49 +567,45 @@ guest_has_devkit() {
     return 1
 }
 
-# Call with the root already mounted and the session already selected (before select_gui_target).
+# Call with the root already mounted and before the session/GUI is selected.
+# GNOME >= 49 has no X11 session, so leftover gnome-xorg.desktop entries must
+# never be offered. With mutter-devkit we can still start a nested Wayland
+# shell on the host display.
 session_probe_guest() {
     local root="$1"
 
     VED_GUEST_GNOME_MAJOR=""
     VED_GUEST_DEVKIT_OK=0
+    VED_GUEST_NO_X11=0
+    VED_GUEST_SESSION_DESKTOP=""
+    VED_GUEST_CURRENT_DESKTOP=""
+
     [[ "$VED_SESSION" == "desktop" ]] || return 0
-    [[ -z "$VED_COMMAND" ]] || return 0       # the user chose their own command
+    [[ -z "$VED_COMMAND" ]] || return 0
 
     VED_GUEST_GNOME_MAJOR="$(detect_gnome_major "$root" || true)"
+
     [[ "${VED_GUEST_GNOME_MAJOR:-0}" -ge 49 ]] || {
         VED_GUEST_GNOME_MAJOR=""
         return 0
     }
 
+    VED_GUEST_NO_X11=1
+
     if [[ "$VED_GUI_TARGET" == "nested" ]]; then
         warn "$(t gnome_no_x11_nested "$VED_GUEST_GNOME_MAJOR")"
-    else
-        info "$(t gnome_using_devkit "$VED_GUEST_GNOME_MAJOR")"
     fi
-    VED_GUI_TARGET="host"        # avoids Xephyr and the assistant's question
+    VED_GUI_TARGET="host"
 
     if guest_has_devkit "$root"; then
         VED_GUEST_DEVKIT_OK=1
+        VED_COMMAND='gnome-shell --devkit --wayland --wayland-display ved-$$'
+        VED_GUEST_SESSION_TYPE="wayland"
+        set_guest_desktop_identity 'GNOME' || true
+        info "$(t gnome_using_devkit "$VED_GUEST_GNOME_MAJOR")"
     else
-        warn "$(t gnome_devkit_missing)"
-    fi
-}
-
-# Replaces session_build_command in the backends. Emits no warnings; outputs only the command.
-session_build_command_ex() {
-    local root="$1"
-    local cmd='gnome-shell --devkit --wayland --wayland-display ved-$$'
-
-    if [[ -n "${VED_GUEST_GNOME_MAJOR:-}" ]]; then
-        [[ "$VED_GUEST_DEVKIT_OK" -eq 1 ]] || return 1
-        if [[ -x "$root/usr/bin/dbus-run-session" ||
-            -x "$root/bin/dbus-run-session" ]]; then
-            cmd="dbus-run-session -- $cmd"
-        fi
-        printf '%s' "$cmd"      # $$ is expanded by the guest's sh, not by ved.
-        return 0
+        warn "$(t gnome_devkit_missing "$VED_GUEST_GNOME_MAJOR")"
     fi
 
-    session_build_command "$root"
+    return 0
 }

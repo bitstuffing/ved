@@ -397,7 +397,7 @@ What gets bound automatically:
 | GPU/DRM (`/dev/dri`, read-write) | ✓ | ✓ |
 | Audio (`/dev/snd`, PipeWire/Pulse) | ✓ | ✓ |
 | Input devices (`/dev/input`) | ✓ | ✓ |
-| System D-Bus (`/run/dbus`) | ✓ | ✓ (without `--boot`) |
+| System D-Bus | ✓ (private guest bus) | ✓ (private bus for graphical sessions, host bus otherwise) |
 | Session D-Bus | ✓ (`dbus-run-session`) | ✓ (`dbus-run-session`) |
 | Private user runtime dir (`/run/user/$UID`) | ✓ | ✓ |
 | Xauthority | ✓ | ✓ |
@@ -415,6 +415,43 @@ systemd *user* manager is actually running inside the container; a container
 started without `--boot` has no PID 1 and therefore no user manager, so the host's
 systemd socket must not be used.
 
+For graphical `chroot` and `systemd-nspawn` sessions, `ved` also isolates the
+session identity:
+
+- it creates a UTS namespace with `unshare --uts` and sets the hostname from the
+  guest's `/etc/hostname` (for example `bbm-Precision-5770`) before entering the
+  chroot;
+- it sets `XDG_SESSION_DESKTOP` and `XDG_CURRENT_DESKTOP` from the selected
+  session's `DesktopNames` instead of copying the host's values. This is what
+  lets applications such as MSEdge see the installed desktop rather than the
+  host session;
+- it starts the **guest's own** system D-Bus in a private `/run/dbus` instead of
+  bind-mounting the host bus. Otherwise `hostnamectl` and D-Bus-aware
+  applications would still report the host name even with an isolated UTS
+  namespace;
+- small `org.freedesktop.login1` and `org.gnome.DisplayManager` stubs are
+  registered on that private bus. Neither a chroot nor a non-boot `nspawn`
+  container has `systemd-logind` or GDM, so GNOME 49 otherwise fails while
+  starting its system-actions state machine with `StartServiceByName ...
+  login1`, then logs a GDM registration error;
+- graphical sessions raise `RLIMIT_MEMLOCK` when the caller has
+  `CAP_SYS_RESOURCE`. For `systemd-nspawn`, `ved` also passes
+  `--rlimit=MEMLOCK=infinity`, which sets the limit directly on the container
+  payload;
+- the guest's `/etc/gcrypt/fips_enabled` force switch is masked with a read-only
+  `/dev/null` bind during graphical sessions. libgcrypt otherwise refuses to use
+  its unlocked secure-memory fallback in FIPS mode, and GNOME Keyring aborts with
+  `out of core in secure memory` when `mlock()` cannot be satisfied. The guest's
+  original file is restored when the session ends.
+
+For `systemd-nspawn`, the private bus directory is also passed as
+`--bind=...:/run/dbus`. nspawn mounts its own tmpfs on `/run` after the setup
+mounts, so binding the directory only on the host root directory is not enough;
+GNOME Shell would still report `Could not connect to system bus`.
+
+If `unshare --uts` or the guest's `dbus-daemon` / `dbus-broker-launch` is
+unavailable, `ved` warns and continues instead of refusing to start the desktop.
+
 The system root is mounted **before** the graphical questions are asked, so `ved`
 can inspect the installed desktop and offer only the options that will work.
 
@@ -426,6 +463,10 @@ can inspect the installed desktop and offer only the options that will work.
   so the session is forced to software rendering (`LIBGL_ALWAYS_SOFTWARE=1`);
   GPU acceleration is only available with the `host` target. Only valid for
   desktops that still support X11 sessions.
+
+The list of installed sessions is filtered by the selected target: Xephyr only
+offers X11 sessions, a Wayland session needs a host compositor socket, and
+GNOME ≥ 49 never offers its leftover `gnome-xorg.desktop` entry.
 
 ### GNOME 49 and newer
 

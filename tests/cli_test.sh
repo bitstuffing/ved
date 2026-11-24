@@ -614,9 +614,10 @@ run_windows_update_vm_helpers() (
     : >"$fixture/esp/EFI/Microsoft/Boot/bootmgfw.efi"
 
     findmnt() { printf '%s\n' "$fixture/esp"; }
+    VM_TEST_PKNAME='/dev/fake0'
     lsblk() {
         case "$*" in
-            *PKNAME*) printf 'fake0\n' ;;
+            *PKNAME*) printf '%s\n' "$VM_TEST_PKNAME" ;;
             *NAME*) printf '/dev/fake0\n' ;;
             *) printf '1048576 3145728\n' ;;
         esac
@@ -624,6 +625,13 @@ run_windows_update_vm_helpers() (
 
     expect_equal "$(powershell_vm_partition_range /dev/fake0p4)" \
         '1048576 3145728' || return 1
+    powershell_vm_assert_partition_on_disk /dev/fake0p4 /dev/fake0 || return 1
+    VM_TEST_PKNAME='/dev/fake1'
+    if powershell_vm_assert_partition_on_disk /dev/fake0p4 /dev/fake0; then
+        printf 'a partition from another disk was accepted\n' >&2
+        return 1
+    fi
+    VM_TEST_PKNAME='/dev/fake0'
 
     VED_VM_DIR="$fixture/vm"
     local esp_image

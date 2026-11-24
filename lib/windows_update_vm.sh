@@ -25,6 +25,18 @@ powershell_vm_partition_range() {
     printf '%s %s\n' "$start" "$size"
 }
 
+# Byte offsets are relative to the whole disk, so a mapped/decrypted partition
+# device must not be used as the merge target.
+powershell_vm_assert_partition_on_disk() {
+    local part="$1" disk="$2" part_disk disk_name
+
+    # With -p, PKNAME is already an absolute path. -d stops lsblk from also
+    # printing the disk's children.
+    part_disk="$(lsblk -nrdpo PKNAME "$part" 2>/dev/null | head -n1 || true)"
+    disk_name="$(lsblk -nrdpo NAME "$disk" 2>/dev/null | head -n1 || true)"
+    [[ -n "$part_disk" && -n "$disk_name" && "$part_disk" == "$disk_name" ]]
+}
+
 # Build a raw FAT image containing the selected disk's EFI partition. A fallback
 # BootX64/BootAA64 entry is added so OVMF can boot the copied BCD without any
 # changes to the host's UEFI variables.
@@ -197,8 +209,7 @@ powershell_update_vm() {
     local kb="${VED_UPDATE_KB:-}" plan="" helper plan_env discovery_log count=""
     local candidate="" packages="" boot_loader="" esp_image="" overlay="" backup=""
     local map_file="" ranges="" saved_disk="$VED_DISK" partition_info=""
-    local part_disk="" disk_name="" part_start="" part_size="" disk_size=""
-    local arch rows="0" status_file=""
+    local part_start="" part_size="" disk_size="" arch rows="0" status_file=""
     local qemu_rc=0 merged=0
     local saved_image="$VED_IMAGE" saved_guest="$VED_GUEST_OS" saved_arch="$VED_ARCH"
     local saved_storage="$VED_STORAGE_MODE" saved_boot="$VED_BOOT"
@@ -273,18 +284,14 @@ powershell_update_vm() {
     powershell_write_auto_apply "$kb" "$candidate" "$packages" shutdown
     info "$(t windows_update_apply_ready "$VED_UPDATE_APPLY_SCRIPT")"
 
-    # Byte offsets are relative to the whole disk, so a mapped/decrypted
-    # partition device must not be used as the merge target.
-    part_disk="$(lsblk -nrpo PKNAME "$VED_ROOT_PARTITION" 2>/dev/null | head -n1 || true)"
-    disk_name="$(lsblk -nrpo NAME "$saved_disk" 2>/dev/null | head -n1 || true)"
-    [[ -n "$part_disk" && -n "$disk_name" && "$disk_name" == "/dev/$part_disk" ]] ||
+    powershell_vm_assert_partition_on_disk "$VED_ROOT_PARTITION" "$saved_disk" ||
         die "$(t windows_update_vm_partition_failed)"
 
     partition_info="$(powershell_vm_partition_range "$VED_ROOT_PARTITION" 2>/dev/null || true)"
     read -r part_start part_size <<<"$partition_info"
     [[ "$part_start" =~ ^[0-9]+$ && "$part_size" =~ ^[0-9]+$ ]] ||
         die "$(t windows_update_vm_partition_failed)"
-    disk_size="$(lsblk -b -nrpo SIZE "$saved_disk" 2>/dev/null | head -n1 || true)"
+    disk_size="$(lsblk -b -nrdpo SIZE "$saved_disk" 2>/dev/null | head -n1 || true)"
     [[ "$disk_size" =~ ^[0-9]+$ ]] ||
         die "$(t windows_update_vm_partition_failed)"
 

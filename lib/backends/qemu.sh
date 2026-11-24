@@ -249,6 +249,7 @@ qemu_build_args() {
     local cpu_model
     local serial
     local item
+    local boot_index=0
     local -a spice_agent=()
 
     if ! display_build_args "$mode" "$node"; then
@@ -273,16 +274,23 @@ qemu_build_args() {
     )
 
     if [[ -n "$VED_IMAGE" ]]; then
+        if [[ -n "$VED_ESP_IMAGE" ]]; then
+            VED_QEMU_ARGS+=(
+                -drive "file=$(qemu_escape "$VED_ESP_IMAGE"),format=raw,if=none,id=ved-esp,readonly=on"
+                -device "virtio-blk-pci,drive=ved-esp,bootindex=0"
+            )
+            boot_index=1
+        fi
         serial="$(qemu_disk_serial "$VED_IMAGE")"
         if [[ "$VED_GUEST_OS" == "windows" && "$VED_ARCH" != "aarch64" ]]; then
             VED_QEMU_ARGS+=(
                 -drive "file=$(qemu_escape "$VED_IMAGE"),format=$VED_IMAGE_FORMAT,if=none,id=ved-disk,cache=writeback,aio=threads"
-                -device "nvme,drive=ved-disk,serial=$serial,bootindex=0"
+                -device "nvme,drive=ved-disk,serial=$serial,bootindex=$boot_index"
             )
         else
             VED_QEMU_ARGS+=(
                 -drive "file=$(qemu_escape "$VED_IMAGE"),format=$VED_IMAGE_FORMAT,if=none,id=ved-disk,cache=writeback,aio=threads"
-                -device "virtio-blk-pci,drive=ved-disk,serial=$serial,bootindex=0"
+                -device "virtio-blk-pci,drive=ved-disk,serial=$serial,bootindex=$boot_index"
             )
         fi
     else

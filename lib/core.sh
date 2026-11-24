@@ -48,8 +48,19 @@ VED_SHELL="${VED_SHELL:-pwsh}"
 VED_SHELL_SET="${VED_SHELL_SET:-0}"
 VED_WINDOWS_WRITE="${VED_WINDOWS_WRITE:-0}"
 VED_WINDOWS_DRIVE="${VED_WINDOWS_DRIVE:-C}"
+VED_WINDOWS_WRITE_SET="${VED_WINDOWS_WRITE_SET:-0}"
 VED_WINDOWS_MOUNT=""
 VED_WINDOWS_SCRIPT_DIR=""
+VED_UPDATE_STAGE_DIR=""
+VED_UPDATE_WINDOWS_PATH=""
+VED_UPDATE_APPLY_SCRIPT=""
+VED_UPDATE_AUTO="${VED_UPDATE_AUTO:-0}"
+VED_UPDATE_KB="${VED_UPDATE_KB:-}"
+VED_UPDATE_SHOW_STATUS="${VED_UPDATE_SHOW_STATUS:-0}"
+VED_UPDATE_VM="${VED_UPDATE_VM:-0}"
+VED_UPDATE_BOOT_ENTRY=""
+VED_CREATE_WIN_BOOT_ENTRY=0
+VED_CREATED_WIN_BOOT_ENTRY=""
 VED_GRAPHICAL="${VED_GRAPHICAL:-0}"
 VED_BOOT="${VED_BOOT:-0}"
 VED_SESSION="${VED_SESSION:-auto}"
@@ -372,7 +383,7 @@ ensure_root() {
 
     info "$(t rerun_sudo)"
     exec sudo \
-        --preserve-env=DISPLAY,WAYLAND_DISPLAY,XAUTHORITY,XDG_RUNTIME_DIR,XDG_SESSION_TYPE,DBUS_SESSION_BUS_ADDRESS,VED_LANG,LANG,LC_ALL,LC_MESSAGES,VED_BACKEND,VED_CONFIG,VED_ASSUME_YES,VED_VERBOSE,VED_NO_INSTALL,VED_KEEP_TEMP,VED_SHELL,VED_SHELL_SET,VED_WINDOWS_WRITE,VED_WINDOWS_DRIVE,VED_IMAGE,VED_DOCKER_STORAGE,VED_DOCKER_RESET,VED_DOCKER_LIST,VED_DOCKER_PRUNE \
+        --preserve-env=DISPLAY,WAYLAND_DISPLAY,XAUTHORITY,XDG_RUNTIME_DIR,XDG_SESSION_TYPE,DBUS_SESSION_BUS_ADDRESS,VED_LANG,LANG,LC_ALL,LC_MESSAGES,VED_BACKEND,VED_CONFIG,VED_ASSUME_YES,VED_VERBOSE,VED_NO_INSTALL,VED_KEEP_TEMP,VED_SHELL,VED_SHELL_SET,VED_WINDOWS_WRITE,VED_WINDOWS_DRIVE,VED_WINDOWS_WRITE_SET,VED_UPDATE_AUTO,VED_UPDATE_KB,VED_UPDATE_SHOW_STATUS,VED_UPDATE_VM,VED_IMAGE,VED_DOCKER_STORAGE,VED_DOCKER_RESET,VED_DOCKER_LIST,VED_DOCKER_PRUNE \
         -- "$VED_MAIN" "$@"
 }
 
@@ -758,6 +769,7 @@ parse_cli() {
                 ;;
             --windows-ro)
                 VED_WINDOWS_WRITE=0
+                VED_WINDOWS_WRITE_SET=1
                 ;;
             --windows-drive)
                 VED_WINDOWS_DRIVE="${2:-}"
@@ -765,6 +777,23 @@ parse_cli() {
                 ;;
             --windows-drive=*)
                 VED_WINDOWS_DRIVE="${arg#--windows-drive=}"
+                ;;
+            --auto)
+                VED_UPDATE_AUTO=1
+                ;;
+            --auto-vm|--update-vm)
+                VED_UPDATE_VM=1
+                VED_UPDATE_AUTO=1
+                ;;
+            --kb)
+                VED_UPDATE_KB="${2:-}"
+                shift
+                ;;
+            --kb=*)
+                VED_UPDATE_KB="${arg#--kb=}"
+                ;;
+            --update-status)
+                VED_UPDATE_SHOW_STATUS=1
                 ;;
             --graphical)
                 VED_GRAPHICAL=1
@@ -855,16 +884,59 @@ parse_cli() {
         *) die "$(t backend_invalid "$VED_BACKEND")" ;;
     esac
 
+    # The VM update mode still stages from the Windows partition through the
+    # PowerShell backend; only the apply/reboot phase moves into QEMU/KVM.
+    if [[ "$VED_UPDATE_VM" -eq 1 ]]; then
+        VED_BACKEND="powershell"
+        VED_BACKEND_SET=1
+    fi
+
+    if [[ "$VED_UPDATE_AUTO" -eq 1 || "$VED_UPDATE_SHOW_STATUS" -eq 1 ||
+          -n "$VED_UPDATE_KB" ]] && [[ "$VED_BACKEND" != "powershell" ]]; then
+        die "$(t windows_update_powershell_only)"
+    fi
+
     case "${VED_SHELL,,}" in
         pwsh|powershell) VED_SHELL="pwsh" ;;
         cmd) VED_SHELL="cmd" ;;
+        update|windows-update|winupdate|wu) VED_SHELL="update" ;;
         *) die "$(t shell_invalid "$VED_SHELL")" ;;
     esac
+
+    # Asking for a specific KB only makes sense in the closed automatic flow.
+    if [[ -n "$VED_UPDATE_KB" ]]; then
+        VED_UPDATE_AUTO=1
+    fi
+
+    if [[ "$VED_UPDATE_AUTO" -eq 1 && "$VED_UPDATE_SHOW_STATUS" -eq 1 ]]; then
+        die "$(t windows_update_auto_conflict)"
+    fi
+
+    if [[ "$VED_UPDATE_SHOW_STATUS" -eq 1 ]]; then
+        VED_SHELL="update"
+        VED_SHELL_SET=1
+    fi
+
+    if [[ "$VED_UPDATE_AUTO" -eq 1 ]]; then
+        if [[ "$VED_SHELL_SET" -eq 1 && "$VED_SHELL" != "update" ]]; then
+            die "$(t windows_update_auto_shell_conflict)"
+        fi
+        if [[ "$VED_WINDOWS_WRITE_SET" -eq 1 && "$VED_WINDOWS_WRITE" -eq 0 ]]; then
+            die "$(t windows_update_auto_requires_write)"
+        fi
+        VED_SHELL="update"
+        VED_SHELL_SET=1
+        VED_WINDOWS_WRITE=1
+    fi
 
     if [[ ! "$VED_WINDOWS_DRIVE" =~ ^[A-Za-z]$ ]]; then
         die "$(t windows_drive_invalid "$VED_WINDOWS_DRIVE")"
     fi
     VED_WINDOWS_DRIVE="${VED_WINDOWS_DRIVE^^}"
+
+    if [[ -n "$VED_UPDATE_KB" && ! "$VED_UPDATE_KB" =~ ^(KB[0-9]{4,})(,KB[0-9]{4,})*$ ]]; then
+        die "$(t windows_update_kb_invalid "$VED_UPDATE_KB")"
+    fi
 
     case "${VED_GUEST_OS,,}" in
         auto|linux|windows) VED_GUEST_OS="${VED_GUEST_OS,,}" ;;
@@ -963,6 +1035,16 @@ ved_main() {
         fi
     fi
 
+    if [[ "$VED_UPDATE_VM" -eq 1 && -z "$VED_DISK" &&
+          -z "$VED_ROOT_PARTITION" ]]; then
+        if [[ -t 0 ]]; then
+            select_disk
+            run_args+=(--disk "$VED_DISK")
+        else
+            die "$(t image_and_disk)"
+        fi
+    fi
+
     if [[ "$VED_BACKEND" == "qemu" && -t 0 && "$VED_ARCH" == "auto" ]]; then
         select_arch
         [[ "$VED_ARCH" == "auto" ]] || run_args+=(--arch "$VED_ARCH")
@@ -980,6 +1062,11 @@ ved_main() {
     if [[ "$VED_BACKEND" == "powershell" && "$VED_SHELL_SET" -eq 0 && -t 0 ]]; then
         select_shell
         run_args+=(--shell "$VED_SHELL")
+        if [[ "$VED_UPDATE_VM" -eq 1 ]]; then
+            run_args+=(--auto-vm)
+        elif [[ "$VED_UPDATE_AUTO" -eq 1 ]]; then
+            run_args+=(--auto)
+        fi
     fi
 
     if [[ "$VED_BACKEND" == "qemu" ]]; then

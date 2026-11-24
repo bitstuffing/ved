@@ -43,5 +43,9 @@ source "$VED_ROOT/lib/backends/docker.sh"
 source "$VED_ROOT/lib/backends/nspawn.sh"
 # shellcheck source=lib/backends/powershell.sh
 source "$VED_ROOT/lib/backends/powershell.sh"
+# shellcheck source=lib/windows_update.sh
+source "$VED_ROOT/lib/windows_update.sh"
+# shellcheck source=lib/windows_update_vm.sh
+source "$VED_ROOT/lib/windows_update_vm.sh"
 
 ved_main "$@"

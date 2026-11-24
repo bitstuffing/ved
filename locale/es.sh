@@ -73,10 +73,18 @@ Opciones comunes:
                         Fuerza un nodo de render DRM, por ejemplo /dev/dri/renderD128
       --user NOMBRE     Usuario a usar dentro de chroot o nspawn
   -c, --command ORDEN   Orden a ejecutar en chroot, nspawn o powershell
-      --shell NOMBRE    Backend powershell: pwsh o cmd (por defecto: pwsh)
+      --shell NOMBRE    Backend powershell: pwsh, cmd o update (por defecto: pwsh)
       --windows-write   Monta la partición Windows en lectura/escritura
       --windows-ro      Fuerza solo lectura (útil para anular un archivo de configuración)
       --windows-drive L Letra de unidad para la partición en pwsh (por defecto: C)
+      --auto            Windows Update: comprobar, descargar, reiniciar en Windows,
+                        aplicar la actualización y volver a Linux
+      --auto-vm         Windows Update en QEMU/KVM: prepara las actualizaciones,
+                        arranca una copia de Windows en una VM, las aplica y
+                        mantiene Linux en ejecución
+      --kb KB[,KB]      Limitar la búsqueda automática a KB concretos
+                        (implica --auto)
+      --update-status   Mostrar el resultado de la última actualización automática
       --graphical       Comparte pantalla y audio del host con chroot/nspawn
       --boot            Arranca el invitado con systemd-nspawn en vez de una orden
       --session MODE    chroot/nspawn: shell, app, desktop o system (por defecto: preguntar)
@@ -350,10 +358,18 @@ Otras opciones:
     [select_shell]="¿Qué intérprete de Windows desea?"
     [shell_pwsh]="PowerShell 7 (pwsh nativo, sin VM)"
     [shell_cmd]="cmd (capa de compatibilidad Wine, sin VM)"
+    [shell_update]="Preparación de Windows Update (pwsh con red, empaqueta para aplicar sin conexión)"
+    [shell_update_auto]="Actualización automática de Windows (comprobar, descargar, instalar y reiniciar; totalmente automática)"
+    [shell_update_auto_vm]="Actualización automática de Windows en QEMU/KVM (Linux no se reinicia)"
     [select_shell_prompt]="Opción [1]: "
     [shell_invalid]="Intérprete de Windows no válido: %s"
     [shell_user_invalid]="No se pudo determinar el directorio personal del usuario: %s"
     [windows_drive_invalid]="Letra de unidad de Windows no válida: %s"
+    [windows_update_kb_invalid]="Lista de números KB no válida: %s"
+    [windows_update_powershell_only]="Las opciones de Windows Update requieren el backend powershell."
+    [windows_update_auto_conflict]="--auto y --update-status no se pueden usar juntos."
+    [windows_update_auto_shell_conflict]="--auto requiere el intérprete update."
+    [windows_update_auto_requires_write]="--auto necesita acceso de escritura a la partición Windows. No lo combine con --windows-ro."
     [windows_no_partition]="No se ha encontrado ninguna partición NTFS o BitLocker en: %s"
     [windows_partitions]="Particiones Windows detectadas:"
     [windows_select_partition]="¿Qué partición Windows desea usar? [1]: "
@@ -364,7 +380,7 @@ Otras opciones:
     [windows_temp_failed]="No se pudo preparar el directorio temporal del intérprete de Windows: %s"
     [windows_bitlocker]="La partición %s está cifrada con BitLocker. Descífrela primero (por ejemplo con dislocker) y pase el dispositivo descifrado con --partition."
     [windows_ntfs_missing]="No hay soporte para ntfs-3g ni para ntfs3 del núcleo. Instale ntfs-3g."
-    [windows_hibernated]="La partición Windows está hibernada (Inicio rápido activado). Desactive el Inicio rápido en Windows o deje la partición en solo lectura."
+    [windows_hibernated]="La partición Windows está hibernada o no se puede montar para escritura de forma segura (Inicio rápido). Apague Windows limpiamente y desactive el Inicio rápido, o deje la partición en solo lectura."
     [windows_writable_warning]="ADVERTENCIA: los cambios se escribirán directamente en la partición Windows."
     [windows_write_existing_mount]="La partición ya está montada; no se pueden cambiar las opciones de lectura/escritura. Se usará el montaje existente."
     [windows_using_existing_mount]="Usando el punto de montaje existente: %s"
@@ -377,6 +393,54 @@ Otras opciones:
     [powershell_profile]="Asignando la unidad %s: a la partición Windows."
     [powershell_shell]="Abriendo un intérprete interactivo de PowerShell."
     [powershell_command]="Ejecutando comando de PowerShell: %s"
+    [powershell_update_shell]="Abriendo el terminal de preparación de Windows Update. Las actualizaciones no se pueden aplicar desde Linux; ejecute el script generado tras arrancar Windows."
+    [powershell_update_command]="Ejecutando comando de preparación de Windows Update: %s"
+    [powershell_update_stage_ro]="La partición Windows es de solo lectura; los paquetes se prepararán en un directorio temporal. Use --windows-write para guardarlos en la partición Windows."
+    [powershell_update_stage_failed]="No se pudo crear el directorio de preparación en la partición Windows: %s"
+    [windows_update_dry_run]="Simulación: no se descargarán paquetes ni se reiniciará la máquina."
+    [windows_update_checking]="Comprobando la versión de Windows sin conexión y el catálogo de Microsoft Update..."
+    [windows_update_discovery_failed]="No se pudieron comprobar o preparar los paquetes de Windows Update. Consulte ved-update-discovery.log en el directorio de preparación."
+    [windows_update_plan_invalid]="El plan de Windows Update preparado contiene valores no válidos; no se ha aplicado nada."
+    [windows_update_up_to_date]="Windows ya tiene la actualización acumulativa más reciente; no hace falta reiniciar."
+    [windows_update_found]="Se encontró %s para la versión de Windows sin conexión. Preparando %s paquete(s)."
+    [windows_update_auto_warning]="ACTUALIZACIÓN AUTOMÁTICA DE WINDOWS: ved cambiará el arranque de Windows, reiniciará en Windows, aplicará la actualización y volverá a Linux."
+    [windows_update_auto_confirm]="¿Continuar con la actualización automática? [s/N]: "
+    [windows_update_apply_ready]="Se preparó el script de inicio elevado de Windows: %s"
+    [windows_update_http_missing]="curl o wget es necesario para descubrir los paquetes de Windows Update."
+    [windows_update_uefi_missing]="La actualización automática de Windows requiere UEFI con efibootmgr y una entrada Windows Boot Manager."
+    [windows_update_efibootmgr_missing]="Se necesita efibootmgr para la actualización automática de Windows. Instale el paquete efibootmgr o permita que VED instale las dependencias."
+    [windows_update_boot_entry_missing]="No se encontró ninguna entrada UEFI de Windows Boot Manager. Revise 'efibootmgr -v' y agregue o repare la entrada de arranque de Windows."
+    [windows_update_creating_boot_entry]="No existe una entrada de Windows Boot Manager; creándola desde la partición EFI del disco seleccionado..."
+    [windows_update_boot_entry_created]="Entrada UEFI de Windows Boot Manager creada: Boot%s"
+    [windows_update_boot_entry_create_failed]="No se pudo crear la entrada UEFI de Windows Boot Manager. Revise la partición EFI del disco seleccionado y ejecute 'efibootmgr -v'."
+    [windows_update_boot_entry_dry_run]="Se crearía una entrada UEFI de Windows Boot Manager desde el disco seleccionado."
+    [windows_update_bootnext_busy]="UEFI BootNext ya apunta a Boot%s; bórrelo antes de usar --auto."
+    [windows_update_boot_entry_found]="Entrada UEFI de Windows Boot Manager: Boot%s"
+    [windows_update_setting_bootnext]="Configurando BootNext de UEFI para Windows (una sola vez)..."
+    [windows_update_bootnext_failed]="No se pudo configurar BootNext de UEFI para Windows Boot Manager."
+    [windows_update_boot_restore_ready]="Se guardó el orden de arranque UEFI original; un servicio único de Linux lo restaurará tras el reinicio de vuelta."
+    [windows_update_boot_restore_unavailable]="No se pudo preparar la restauración automática del orden de arranque; compruebe BootOrder de UEFI si la máquina no vuelve a Linux."
+    [windows_update_boot_restore_failed]="No se pudo preparar el servicio único de restauración del orden de arranque en Linux."
+    [windows_update_rebooting]="Windows Update está preparado. Reiniciando en Windows; la máquina volverá a Linux tras la actualización."
+    [windows_update_reboot_failed]="No se pudo reiniciar la máquina. La entrada de inicio de Windows sigue preparada."
+    [windows_update_gpo_failed]="No se pudo preparar el script de inicio único de Windows."
+    [windows_update_vm_warning]="ACTUALIZACIÓN AUTOMÁTICA DE WINDOWS EN QEMU/KVM: ved preparará la actualización, arrancará una copia privada de este disco en una VM y la aplicará allí. El anfitrión Linux y su orden de arranque UEFI no se reinician ni se modifican."
+    [windows_update_vm_confirm]="¿Continuar con la actualización en la máquina virtual? [s/N]: "
+    [windows_update_vm_discovering]="Comprobando la versión de Windows sin conexión y el catálogo de Microsoft Update..."
+    [windows_update_vm_qemu_missing]="QEMU/KVM y qemu-img son necesarios para la actualización de Windows en máquina virtual."
+    [windows_update_vm_partition_failed]="No se pudo determinar el rango de bytes de la partición Windows seleccionada."
+    [windows_update_vm_bootloader_failed]="No se pudo encontrar el cargador de Windows en la partición EFI del disco seleccionado."
+    [windows_update_vm_creating_overlay]="Creando una copia QEMU de escritura diferida de %s..."
+    [windows_update_vm_esp_ready]="Se preparó una partición EFI virtual temporal para la VM."
+    [windows_update_vm_starting]="Arrancando Windows en QEMU/KVM. Espere a que termine la actualización y la VM se apague..."
+    [windows_update_vm_no_qemu]="La máquina virtual no terminó limpiamente."
+    [windows_update_vm_merging]="Aplicando %s rango(s) de disco modificado(s) a la partición Windows..."
+    [windows_update_vm_restoring]="La actualización de la VM no se completó; restaurando la partición Windows original."
+    [windows_update_vm_no_status]="La VM no escribió un resultado de Windows Update. La partición original se restauró."
+    [windows_update_vm_failed]="La actualización automática de Windows en QEMU/KVM falló. El anfitrión no se reinició."
+    [windows_update_vm_success]="La actualización automática de Windows en QEMU/KVM terminó. El anfitrión Linux no se reinició."
+    [windows_update_status_title]="Resultado de la última actualización automática de Windows:"
+    [windows_update_no_status]="No se encontró un archivo de estado de actualización automática en la partición Windows."
     [wine_needs_user]="Wine no puede ejecutarse como root. Ejecute ved con sudo desde su usuario normal para usar el intérprete cmd."
     [wine_prefix_failed]="No se pudo inicializar el prefijo de Wine; es posible que cmd no arranque."
     [cmd_shell]="Abriendo un intérprete cmd interactivo (Wine). La partición Windows es la unidad W:."

@@ -1,3 +1,6 @@
+# core.sh owns this default; repeat it here so standalone shellcheck runs see it.
+: "${VED_WINDOWS_DRIVE:=C}"
+
 require_tty() {
     if [[ ! -t 0 ]]; then
         die "$(t no_tty)"
@@ -76,12 +79,29 @@ select_shell() {
     info "$(t select_shell)"
     printf '  1) %s\n' "$(t shell_pwsh)"
     printf '  2) %s\n' "$(t shell_cmd)"
+    printf '  3) %s\n' "$(t shell_update)"
+    printf '  4) %s\n' "$(t shell_update_auto)"
+    printf '  5) %s\n' "$(t shell_update_auto_vm)"
     echo
 
     option="$(ask "$(t select_shell_prompt)" "1")"
     case "$option" in
         1) VED_SHELL="pwsh" ;;
         2) VED_SHELL="cmd" ;;
+        3) VED_SHELL="update" ;;
+        4)
+            VED_SHELL="update"
+            VED_UPDATE_AUTO=1
+            VED_WINDOWS_WRITE=1
+            VED_WINDOWS_WRITE_SET=1
+            ;;
+        5)
+            VED_SHELL="update"
+            VED_UPDATE_AUTO=1
+            VED_UPDATE_VM=1
+            VED_WINDOWS_WRITE=1
+            VED_WINDOWS_WRITE_SET=1
+            ;;
         *) die "$(t invalid_option)" ;;
     esac
     VED_SHELL_SET=1
@@ -263,7 +283,14 @@ show_configuration() {
     info "$(t configuration)"
     msg backend_label "$VED_BACKEND"
     if [[ "$VED_BACKEND" == "powershell" ]]; then
-        msg shell_label "$(t "shell_$VED_SHELL")"
+        if [[ "$VED_SHELL" == "update" && "$VED_UPDATE_AUTO" -eq 1 &&
+              "$VED_UPDATE_VM" -eq 1 ]]; then
+            msg shell_label "$(t shell_update_auto_vm)"
+        elif [[ "$VED_SHELL" == "update" && "$VED_UPDATE_AUTO" -eq 1 ]]; then
+            msg shell_label "$(t shell_update_auto)"
+        else
+            msg shell_label "$(t "shell_$VED_SHELL")"
+        fi
         msg windows_drive_label "${VED_WINDOWS_DRIVE}:"
         if [[ "$VED_WINDOWS_WRITE" -eq 1 ]]; then
             msg windows_access_label "$(t windows_rw_value)"

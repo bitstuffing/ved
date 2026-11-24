@@ -75,6 +75,7 @@ package_name() {
     case "$VED_PKG_FAMILY:$logical" in
         debian:qemu) printf '%s' "qemu-system-x86" ;;
         debian:qemu_aarch64) printf '%s' "qemu-system-arm" ;;
+        debian:qemu_utils) printf '%s' "qemu-utils" ;;
         debian:ovmf) printf '%s' "ovmf" ;;
         debian:aavmf) printf '%s' "qemu-efi-aarch64" ;;
         debian:virt_viewer) printf '%s' "virt-viewer" ;;
@@ -88,12 +89,14 @@ package_name() {
         debian:ntfs_3g) printf '%s' "ntfs-3g" ;;
         debian:wine) printf '%s' "wine" ;;
         debian:skopeo) printf '%s' "skopeo" ;;
-        debian:python3) printf '%s' "python3" ;;
+        debian:http_client) printf '%s' "curl" ;;
+        debian:efibootmgr) printf '%s' "efibootmgr" ;;
         debian:tar) printf '%s' "tar" ;;
         debian:zstd) printf '%s' "zstd" ;;
 
         fedora:qemu) printf '%s' "qemu-system-x86" ;;
         fedora:qemu_aarch64) printf '%s' "qemu-system-aarch64" ;;
+        fedora:qemu_utils) printf '%s' "qemu-img" ;;
         fedora:ovmf) printf '%s' "edk2-ovmf" ;;
         fedora:aavmf) printf '%s' "edk2-aarch64" ;;
         fedora:virt_viewer) printf '%s' "virt-viewer" ;;
@@ -107,12 +110,14 @@ package_name() {
         fedora:ntfs_3g) printf '%s' "ntfs-3g" ;;
         fedora:wine) printf '%s' "wine" ;;
         fedora:skopeo) printf '%s' "skopeo" ;;
-        fedora:python3) printf '%s' "python3" ;;
+        fedora:http_client) printf '%s' "curl" ;;
+        fedora:efibootmgr) printf '%s' "efibootmgr" ;;
         fedora:tar) printf '%s' "tar" ;;
         fedora:zstd) printf '%s' "zstd" ;;
 
         arch:qemu) printf '%s' "qemu-full" ;;
         arch:qemu_aarch64) printf '%s' "qemu-full" ;;
+        arch:qemu_utils) printf '%s' "qemu-full" ;;
         arch:ovmf) printf '%s' "ovmf" ;;
         arch:aavmf) printf '%s' "edk2-armvirt" ;;
         arch:virt_viewer) printf '%s' "virt-viewer" ;;
@@ -126,12 +131,14 @@ package_name() {
         arch:ntfs_3g) printf '%s' "ntfs-3g" ;;
         arch:wine) printf '%s' "wine" ;;
         arch:skopeo) printf '%s' "skopeo" ;;
-        arch:python3) printf '%s' "python3" ;;
+        arch:http_client) printf '%s' "curl" ;;
+        arch:efibootmgr) printf '%s' "efibootmgr" ;;
         arch:tar) printf '%s' "tar" ;;
         arch:zstd) printf '%s' "zstd" ;;
 
         suse:qemu) printf '%s' "qemu-x86" ;;
         suse:qemu_aarch64) printf '%s' "qemu-arm" ;;
+        suse:qemu_utils) printf '%s' "qemu-tools" ;;
         suse:ovmf) printf '%s' "ovmf" ;;
         suse:aavmf) printf '%s' "qemu-uefi-aarch64" ;;
         suse:virt_viewer) printf '%s' "virt-viewer" ;;
@@ -145,12 +152,14 @@ package_name() {
         suse:ntfs_3g) printf '%s' "ntfs-3g" ;;
         suse:wine) printf '%s' "wine" ;;
         suse:skopeo) printf '%s' "skopeo" ;;
-        suse:python3) printf '%s' "python3" ;;
+        suse:http_client) printf '%s' "curl" ;;
+        suse:efibootmgr) printf '%s' "efibootmgr" ;;
         suse:tar) printf '%s' "tar" ;;
         suse:zstd) printf '%s' "zstd" ;;
 
         alpine:qemu) printf '%s' "qemu-system-x86_64" ;;
         alpine:qemu_aarch64) printf '%s' "qemu-system-aarch64" ;;
+        alpine:qemu_utils) printf '%s' "qemu-img" ;;
         alpine:ovmf) printf '%s' "ovmf" ;;
         alpine:aavmf) printf '%s' "qemu-efi-aarch64" ;;
         alpine:virt_viewer) printf '%s' "virt-viewer" ;;
@@ -164,12 +173,14 @@ package_name() {
         alpine:ntfs_3g) printf '%s' "ntfs-3g" ;;
         alpine:wine) printf '%s' "wine" ;;
         alpine:skopeo) printf '%s' "skopeo" ;;
-        alpine:python3) printf '%s' "python3" ;;
+        alpine:http_client) printf '%s' "curl" ;;
+        alpine:efibootmgr) printf '%s' "efibootmgr" ;;
         alpine:tar) printf '%s' "tar" ;;
         alpine:zstd) printf '%s' "zstd" ;;
 
         void:qemu) printf '%s' "qemu" ;;
         void:qemu_aarch64) printf '%s' "qemu" ;;
+        void:qemu_utils) printf '%s' "qemu" ;;
         void:ovmf) printf '%s' "ovmf" ;;
         void:aavmf) printf '%s' "" ;;
         void:virt_viewer) printf '%s' "virt-viewer" ;;
@@ -183,7 +194,8 @@ package_name() {
         void:ntfs_3g) printf '%s' "ntfs-3g" ;;
         void:wine) printf '%s' "wine" ;;
         void:skopeo) printf '%s' "skopeo" ;;
-        void:python3) printf '%s' "python3" ;;
+        void:http_client) printf '%s' "curl" ;;
+        void:efibootmgr) printf '%s' "efibootmgr" ;;
         void:tar) printf '%s' "tar" ;;
         void:zstd) printf '%s' "zstd" ;;
 
@@ -197,6 +209,7 @@ logical_present() {
     case "$logical" in
         qemu) have qemu-system-x86_64 ;;
         qemu_aarch64) have qemu-system-aarch64 ;;
+        qemu_utils) have qemu-img ;;
         ovmf) ovmf_available ;;
         aavmf) aavmf_available ;;
         virt_viewer) have remote-viewer || have virt-viewer || have spicy ;;
@@ -207,7 +220,8 @@ logical_present() {
         findutils) have find ;;
         systemd_container) have systemd-nspawn ;;
         skopeo) have skopeo ;;
-        python3) have python3 ;;
+        http_client) have curl || have wget ;;
+        efibootmgr) have efibootmgr ;;
         tar) have tar ;;
         zstd) have zstd ;;
         swtpm) have swtpm ;;
@@ -278,7 +292,7 @@ ensure_dependencies() {
             ;;
         docker)
             required=(skopeo tar util_linux coreutils findutils)
-            optional=(python3 zstd xephyr)
+            optional=(zstd xephyr)
             ;;
         powershell)
             # pwsh is intentionally NOT auto-installed: most distributions
@@ -287,6 +301,15 @@ ensure_dependencies() {
             required=(util_linux coreutils findutils ntfs_3g)
             if [[ "$VED_SHELL" == "cmd" ]]; then
                 required+=(wine)
+            fi
+            if [[ "$VED_UPDATE_VM" -eq 1 ]]; then
+                required+=(http_client qemu_utils dosfstools)
+                case "$(uname -m)" in
+                    aarch64|arm64) required+=(qemu_aarch64 aavmf) ;;
+                    *) required+=(qemu ovmf) ;;
+                esac
+            elif [[ "$VED_UPDATE_AUTO" -eq 1 ]]; then
+                required+=(http_client efibootmgr)
             fi
             ;;
     esac

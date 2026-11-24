@@ -26,6 +26,7 @@ deliberate exception), and asks for the administrator password only once.
   - [Installing pwsh](#installing-pwsh)
   - [What the backend does](#what-the-backend-does)
   - [Verifying the PowerShell environment](#verifying-the-powershell-environment)
+  - [Windows Update preparation terminal](#windows-update-preparation-terminal)
   - [Limitations — please read](#limitations--please-read)
 - [Interactive flow](#interactive-flow)
 - [USB devices (webcam, Bluetooth/AirPods, phones)](#usb-devices-webcam-bluetoothairpods-phones)
@@ -53,8 +54,8 @@ deliberate exception), and asks for the administrator password only once.
 - **Physical disks, partitions or images**: pass a whole disk (`--disk`), a Linux root
   partition (`--partition`) or a disk image (`--image`).
 - **Five backends**: QEMU/KVM, `chroot`, `systemd-nspawn`, Docker/OCI image, and a
-  Windows shell backend that mounts an NTFS partition and opens **PowerShell 7 (`pwsh`)** or
-  **cmd (via Wine)** — with no QEMU process at all.
+  Windows shell backend that mounts an NTFS partition and opens **PowerShell 7 (`pwsh`)**,
+  **cmd (via Wine)** or a **Windows Update preparation terminal** — with no QEMU process at all.
 - **Docker images without Docker**: download Alpine, Debian, Ubuntu or any OCI image
   with `skopeo`, extract its layers into a plain directory and execute it with `chroot`.
 - **Automatic detection** of disks, EFI system partitions, EFI loaders, guest OS,
@@ -81,7 +82,13 @@ deliberate exception), and asks for the administrator password only once.
   without leaving the terminal.
 - **Windows partition shell**: mounts the NTFS/BitLocker-unlocked partition read-only
   by default, maps it to a `C:` PSDrive in PowerShell (or `W:` in Wine cmd), and
-  detects already-mounted partitions so it can reuse them.
+  detects already-mounted partitions so it can reuse them. `--shell update` opens
+  a networked pwsh terminal that downloads update packages and generates a DISM
+  script to apply them after booting Windows/WinRE. `--auto` performs the whole
+  check → download → boot Windows → install → reboot → status cycle without
+  manual Windows steps. `--auto-vm` performs the same check/download/apply cycle
+  inside QEMU/KVM with a copy-on-write overlay, so the Linux session and its
+  UEFI boot order are never changed.
 
 ## Requirements
 
@@ -104,9 +111,11 @@ dependencies are:
 | Containers (nspawn backend) | `systemd-container` |
 | OCI image download (docker backend) | `skopeo` |
 | Layer extraction (docker backend) | `tar` (and `zstd` for zstd-compressed layers when `tar` lacks `--zstd`) |
-| OCI metadata (docker backend, optional) | `python3`; a `sed` fallback is used when absent |
-| Windows shell (powershell backend) | `pwsh` (PowerShell 7) — **not auto-installed**, see below |
-| NTFS access (powershell backend) | `ntfs-3g` (or kernel `ntfs3` support) |
+| OCI metadata (docker backend) | `sed`, `awk` (no interpreter needed) |
+| Windows shell (powershell backend) | `pwsh` (PowerShell 7) — **not auto-installed**, see below; not needed for `--auto` |
+| Automatic Windows Update (`--auto`) | `curl` or `wget`, `efibootmgr`, `systemctl`; a missing Windows Boot Manager entry is created from the selected disk's EFI partition |
+| Automatic Windows Update in a VM (`--auto-vm`) | `curl` or `wget`, `qemu-img`, QEMU/KVM, OVMF and `mkfs.vfat`; **no** `efibootmgr` and no host reboot |
+| NTFS access (powershell backend) | `ntfs-3g` (its `ntfs-3g.probe` gives the safest hibernation check) or kernel `ntfs3` support |
 | cmd shell (optional) | `wine` |
 | Nested X11 (optional) | `Xephyr` (only for guests that still support X11 sessions) |
 
@@ -172,7 +181,7 @@ The tool will:
 | **chroot** | `-b chroot` | Mounts an installed Linux system and enters it with `chroot`. Can bind the host display/audio with `--graphical`. |
 | **systemd-nspawn** | `-b nspawn` | Mounts an installed Linux system and runs it as a container; `--boot` boots it with systemd. |
 | **Docker/OCI image** | `-b docker` (aliases: `oci`, `docker-image`) | Downloads an OCI image with `skopeo`, extracts it to a directory and runs it with `chroot`. No Docker daemon, container runtime, namespaces or cgroups. |
-| **Windows shell** | `-b powershell` (aliases: `pwsh`, `windows`) | Mounts a Windows partition and opens native PowerShell 7 (`--shell pwsh`) or Wine cmd (`--shell cmd`). No QEMU, no graphics stack. |
+| **Windows shell** | `-b powershell` (aliases: `pwsh`, `windows`) | Mounts a Windows partition and opens native PowerShell 7 (`--shell pwsh`), Wine cmd (`--shell cmd`) or the update preparation terminal (`--shell update`). `--auto` checks, downloads and installs updates across a reboot into Windows. `--auto-vm` temporarily uses QEMU/KVM instead, leaving Linux running. |
 
 > **Security:** `chroot` is not a security boundary. It runs with host privileges and exposes host kernel interfaces to the installed system. Use it only with installations you trust; use QEMU for untrusted disks or images. The same warning applies to the Docker backend: an OCI image is **not** sandboxed here.
 
@@ -254,10 +263,11 @@ refuses incompatible images with a clear error. `--arch x86_64|aarch64` also
 requests the matching platform from the registry when `skopeo` supports
 `--override-arch`. Supported architectures are amd64/x86_64 and arm64/aarch64.
 
-`python3` provides robust JSON parsing when available; otherwise a small `sed`
-fallback is used. `WORKDIR` is honoured for both commands and interactive
-shells. Image `ENV` values are passed to the guest, except for variables that
-would break VED's display, identity or D-Bus integration.
+Image metadata is parsed entirely in the shell with small `sed`/`awk`
+scanners, so no JSON library or interpreter is needed. `WORKDIR` is honoured
+for both commands and interactive shells. Image `ENV` values are passed to the
+guest, except for variables that would break VED's display, identity or D-Bus
+integration.
 
 ### Security and limitations
 
@@ -288,6 +298,7 @@ available, and neither starts QEMU:
 | --- | --- | --- | --- |
 | `pwsh` (default) | `pwsh -NoLogo -NoProfile -NoExit -File <ved-profile.ps1>` | Microsoft's **native Linux PowerShell 7** | A real PowerShell prompt. `ved` injects a small startup script that creates a `C:` PSDrive pointing at the mount and moves you there, so the prompt reads `PS C:\>`. |
 | `cmd` | `wine cmd.exe` | **Wine's** `cmd.exe` reimplementation | A familiar `cmd` prompt. The Windows partition is exposed as `W:` (Wine keeps its own `C:` intact). Requires `wine`. |
+| `update` | `pwsh -NoLogo -NoProfile -NoExit -File <ved-update-shell.ps1>` | **Native PowerShell 7** with helper commands | A terminal with network access that downloads MSU/CAB packages and writes a DISM script. It does **not** apply updates by itself — see [Windows Update preparation terminal](#windows-update-preparation-terminal). For a closed loop, use `--auto` instead. |
 
 ```bash
 # PowerShell 7 on the detected Windows partition of a disk
@@ -307,6 +318,12 @@ available, and neither starts QEMU:
 
 # Wine cmd instead of PowerShell
 ./ved -b powershell -p /dev/nvme0n1p3 --shell cmd
+
+# Windows Update preparation terminal (network + staging + DISM script)
+./ved -b powershell -p /dev/nvme0n1p3 --shell update --windows-write
+
+# Fully closed: check, download, install, reboot; -y skips the final prompt
+./ved -b powershell -p /dev/nvme0n1p3 --auto -y
 
 # One-shot command: ved dot-sources the C: mapping first, then runs your command
 ./ved -b powershell -p /dev/nvme0n1p3 -c 'Get-ChildItem C:\Windows | Select-Object -First 5'
@@ -350,10 +367,13 @@ standard repositories.
    `Windows\System32` to identify the actual system partition. If several look
    plausible, you are asked to choose.
 2. **Mounts it safely.** The default is **read-only** (`-o ro,nosuid,nodev`).
-   Use `--windows-write` for read-write; `ved` refuses if `hiberfil.sys` exists
-   (Windows Fast Startup), because writing to a hibernated NTFS volume corrupts it.
-   If the partition is already mounted by your desktop, `ved` reuses that mount
-   point instead of mounting it twice.
+   Use `--windows-write` for read-write. VED first asks `ntfs-3g.probe` whether a
+   read-write mount is safe; if that tool is unavailable, it only treats a
+   large `hiberfil.sys` with a real hibernation header as hibernated. The file's
+   mere presence is not enough, so a cleanly shut down Windows installation with
+   hibernation enabled is no longer falsely rejected. If the partition is already
+   mounted by your desktop, `ved` reuses that mount point instead of mounting it
+   twice.
 3. **Creates private helper files.** The startup script is written to a
    user-owned `/tmp/ved-shell.XXXXXX` directory, not to the root-only
    `/run/ved` runtime directory. A private `PSReadLine_history.txt` is created
@@ -382,6 +402,192 @@ You should see your normal home (for example `/home/<user>`) and a path under
 `ved` version or a wrapper changed the environment; re-run with `-v` and check
 the `shell environment: user=... home=...` debug line.
 
+### Windows Update preparation terminal
+
+`--shell update` (aliases: `windows-update`, `winupdate`, `wu`) opens native
+PowerShell 7 with the partition mapped as before, plus a set of helper commands.
+It is explicit about what it can and cannot do:
+
+- It **cannot** launch Windows Update against the offline partition.
+  `UsoClient.exe`, `wuauclt.exe` and the Settings app are Windows
+  executables/services; Wine does not implement the Windows servicing stack, and
+  `pwsh` on Linux runs on the host kernel. Neither can update a Windows system
+  that is not booted.
+- It **can** use the network, read the offline Windows build from `ntoskrnl.exe`,
+  open the Microsoft Update Catalog for a KB number, download MSU/CAB packages,
+  and generate a `.cmd` script that applies them with DISM.
+
+The helper commands available in the terminal are:
+
+| Command | Purpose |
+| --- | --- |
+| `Show-VedUpdateHelp` | Print the built-in help again. |
+| `Get-VedWindowsBuild` | Read the offline Windows version from the mounted partition. |
+| `Get-VedCatalogUrl -KbNumber KB1234567` | Print the Microsoft Update Catalog search URL. |
+| `Save-VedUpdatePackage -Url <https-url> [-Name <file.msu>]` | Download one package into the staging directory. |
+| `Get-VedStagedUpdates` | List staged `.msu`/`.cab` files. |
+| `Write-VedApplyScript [-Output <path.cmd>]` | Generate the DISM script. |
+
+With `--windows-write`, packages and the generated script are staged in
+`C:\VEDUpdates` on the Windows partition (adjust the drive letter with
+`--windows-drive`). Without it, staging goes to a temporary directory and the
+generated script asks you to set `VED_PACKAGE_DIR` when you run it.
+
+Typical workflow:
+
+```bash
+./ved -b powershell -p /dev/nvme0n1p3 --shell update --windows-write
+```
+
+```powershell
+Get-VedWindowsBuild
+Get-VedCatalogUrl -KbNumber KB1234567
+# Open the printed URL in a browser, copy the download link, then:
+Save-VedUpdatePackage -Url 'https://catalog.s.download.windowsupdate.com/.../package.msu'
+Get-VedStagedUpdates
+Write-VedApplyScript
+```
+
+Then boot Windows (or WinRE), open an **administrator** command prompt and run
+`C:\VEDUpdates\apply-ved-updates.cmd`. The script uses
+`dism /Image:C:\ /Add-Package /PackagePath:...` and writes `ved-dism.log` next to
+the packages. If WinRE assigns a different letter to the Windows partition, set
+`VED_IMAGE_DRIVE` (for example `set VED_IMAGE_DRIVE=D:`) before running the
+script. In this manual mode, downloading still requires a browser or a direct
+HTTPS URL. The fully automatic mode below performs the catalog lookup and
+download for you.
+
+> This mode does **not** make Windows Update work under Linux. It is a staging
+> helper for offline servicing. `--auto` still applies the update from a booted
+> Windows session; no Windows servicing component is run on the Linux kernel.
+
+### Fully automatic Windows Update (one command)
+
+`--auto` is the closed-loop option for users who do not want to inspect logs,
+copy catalog links or run commands in Windows. It uses no QEMU/KVM: Linux finds
+and stages the packages, then Windows itself installs them after a reboot.
+
+```bash
+# Save all work first: this reboots the machine twice.
+./ved -b powershell -p /dev/nvme0n1p3 --auto -y
+
+# Restrict the catalog search to specific KB numbers (--kb implies --auto).
+./ved -b powershell -p /dev/nvme0n1p3 --kb KB5132061 -y
+
+# Show what would happen without downloading or rebooting.
+./ved -b powershell -p /dev/nvme0n1p3 --auto --dry-run
+
+# After the machine returns to Linux:
+./ved -b powershell -p /dev/nvme0n1p3 --update-status
+```
+
+The automatic sequence is:
+
+1. Read the offline build and architecture from `ntoskrnl.exe` and the installed
+   `.mum` packages.
+2. Search the Microsoft Update Catalog, choose the newest matching cumulative
+   update (or the KB numbers passed with `--kb`), and download its MSU/CAB files
+   into `C:\VEDUpdates` (adjust the drive letter with `--windows-drive`). This
+   step is entirely in `lib/windows_update.sh`: Bash plus `curl`/`wget` and
+   standard text tools, with no Python interpreter or third-party modules.
+3. Refuse to continue if UEFI `BootNext` is already set. Save the original
+   `BootOrder`, prepare a one-shot Linux service to restore it, and write a
+   self-removing elevated Windows startup script.
+4. Set a one-shot UEFI `BootNext` to Windows Boot Manager, unmount the Windows
+   partition and reboot.
+5. The Windows startup script applies the staged packages with
+   `dism /Online /Add-Package /NoRestart`, writes
+   `VEDUpdates\ved-update-status.txt`, removes its own startup entry and reboots.
+6. Linux boots first again; the one-shot service restores the original boot
+   order and removes itself. `--update-status` prints the result.
+
+Without `-y`, `ved` asks for one confirmation after the packages have been
+staged and before any boot setting is changed. With `-y`, the sequence is fully
+unattended. The interactive Windows shell menu also offers the automatic mode as
+option **4**.
+
+Requirements and limits:
+
+- **The machine will reboot.** Save work before starting. Keep the power on
+  until Linux returns.
+- UEFI with `efibootmgr` is required. VED adds `efibootmgr` to the auto-mode
+  dependency list and can install it unless `--no-install` is used. A renamed
+  boot entry is recognized through its `bootmgfw.efi` device path. If no Windows
+  Boot Manager entry exists, VED creates one from the EFI partition of the
+  selected disk (`\EFI\Microsoft\Boot\bootmgfw.efi`) and removes it again if the
+  operation is rolled back. GRUB `grub-reboot` and BIOS/legacy systems are not
+  supported. `systemctl` is used
+  to schedule boot-order restoration; if it is unavailable, `ved` warns and you
+  may need to restore `BootOrder` manually.
+- Windows must be shut down cleanly (no hibernation/Fast Startup), BitLocker
+  partitions must already be unlocked, and the partition must be writable.
+  `--windows-ro` is rejected with `--auto`.
+- Package discovery and staging are pure Bash using `curl` or `wget`; no Python,
+  interpreter modules or JSON library are needed. Native `pwsh` is **not** needed
+  for this mode either.
+- The Windows installation must boot with `C:` as its system drive: the
+  one-shot startup entry is installed under `C:\Windows\System32\GroupPolicy`.
+- If Windows fails before the startup script runs, clear the one-shot boot
+  target with `efibootmgr -N` and inspect `VEDUpdates\ved-update-status.txt` and
+  `ved-auto-apply.log`. If the reboot command itself fails, `ved` clears
+  `BootNext` and removes the prepared startup entry.
+
+### Fully automatic Windows Update without rebooting Linux (`--auto-vm`)
+
+`--auto-vm` is the no-reboot alternative. It stages the same packages on the
+Windows partition, then boots **a private copy of the selected disk** in
+QEMU/KVM. A qcow2 overlay uses the real disk as a read-only backing file, a
+virtual ESP copied from that disk's EFI partition provides the Windows loader,
+and temporary OVMF variables keep the guest firmware state separate. Neither
+`BootNext`, `BootOrder`, nor host NVRAM is touched, and Linux stays in the same
+terminal session.
+
+```bash
+# Update Windows in a VM; Linux is never rebooted.
+./ved --auto-vm -y
+
+# Restrict the catalog search to specific KB numbers (--kb implies auto mode).
+./ved --auto-vm --kb KB5132061 -y
+
+# Stage/plan only: print the commands without changing the disk or booting a VM.
+./ved --auto-vm --dry-run
+
+# Read the same result file afterwards.
+./ved -b powershell -p /dev/nvme0n1p3 --update-status
+```
+
+The VM sequence is:
+
+1. Reuse the Bash discovery/staging code from `--auto` to find the newest
+   cumulative update (or the requested KBs) and download the MSU/CAB files to
+   `C:\VEDUpdates`.
+2. Write the self-removing elevated startup script, but configure it to
+   **shut the VM down** after DISM instead of rebooting.
+3. Unmount Windows, create the qcow2 overlay and a temporary virtual ESP, then
+   start QEMU/KVM with temporary OVMF variables.
+4. The guest applies the packages with `dism /Online /Add-Package /NoRestart`,
+   writes `VEDUpdates\ved-update-status.txt`, removes its startup entry and
+   powers off the VM.
+5. `ved` maps the overlay's changed clusters and copies back **only ranges that
+   intersect the Windows partition**. Every overwritten byte range is saved to
+   a sparse backup first.
+6. If QEMU fails, the status file is missing, or the guest reports `FAILED`,
+   `ved` restores the backed-up ranges and removes the startup entry. Linux is
+   never rebooted.
+
+Without `-y`, `ved` asks for one explicit confirmation after discovery and
+before the VM is started. The interactive Windows shell menu offers this mode
+as option **5**. Native `pwsh` and `efibootmgr` are not needed.
+
+Limits: the Windows partition must be writable, cleanly shut down and, if
+BitLocker is used, already unlocked. Pass the real partition device of the
+selected disk (not a decrypted mapper device) so changed blocks can be merged
+at the correct disk offsets. The selected disk must not be in use by another VM
+while the overlay is active. Changed clusters outside the Windows
+partition (for example in the EFI partition) are intentionally discarded. Keep
+the machine powered on until the merge finishes; the backup is removed when
+`ved` exits.
+
 ### Limitations — please read
 
 - This is **not** your installed Windows. Its own `System32\cmd.exe`,
@@ -389,6 +595,10 @@ the `shell environment: user=... home=...` debug line.
   cross-platform PowerShell 7 runtime, and `cmd` is Wine's implementation.
 - Windows PowerShell **5.1** cannot run under Wine; use PowerShell 7 (`pwsh`) or
   Wine's `cmd` instead.
+- **Windows Update cannot be run on the Linux kernel.** `--shell update` prepares
+  packages and a DISM script. `--auto` stages the same packages and then lets a
+  booted Windows session run DISM; see
+  [Fully automatic Windows Update](#fully-automatic-windows-update-one-command).
 - Read-only is the default on purpose. Most inspection and repair tasks work
   fine read-only; enable `--windows-write` only when you know the volume is not
   hibernated and you really want to change files. Linux NTFS mounts do not
@@ -419,6 +629,7 @@ Option [1]:
 Which Windows shell do you want?
   1) PowerShell 7 (native pwsh, no VM)
   2) cmd (Wine compatibility layer, no VM)
+  3) Windows Update prep (pwsh with network, stage packages for offline apply)
 Option [1]:
 
 What do you want to launch inside the system?
@@ -657,10 +868,14 @@ Common options:
       --render-node DEV Force a DRM render node, for example /dev/dri/renderD128
       --user NAME       User to use inside a chroot, nspawn or Docker guest
   -c, --command CMD     Command to run in chroot, nspawn, Docker or powershell
-      --shell NAME      powershell backend: pwsh or cmd (default: pwsh)
+      --shell NAME      powershell backend: pwsh, cmd or update (default: pwsh)
       --windows-write   Mount the Windows partition read-write (default: read-only)
       --windows-ro      Force read-only (useful to override a config file)
       --windows-drive L Drive letter for the partition in pwsh (default: C)
+      --auto            Fully automatic Windows Update; reboots into Windows
+      --auto-vm         Fully automatic Windows Update in QEMU/KVM; Linux stays up
+      --kb KB[,KB]      Restrict automatic discovery to specific KB(s) (implies --auto)
+      --update-status   Print the last automatic Windows Update result
       --graphical       Bind the host display and audio into chroot/nspawn/Docker
       --boot            Boot the guest with systemd-nspawn instead of a command
       --session MODE    shell, app, desktop or system (default: ask)
@@ -759,6 +974,18 @@ Other options:
 
 # Run one PowerShell command against the Windows partition
 ./ved -b powershell -p /dev/nvme0n1p3 -c 'Get-ChildItem C:\'
+
+# Stage Windows Update packages manually (the install itself needs booted Windows)
+./ved -b powershell -p /dev/nvme0n1p3 --shell update --windows-write
+
+# Or let ved check, download, install and reboot by itself
+./ved -b powershell -p /dev/nvme0n1p3 --auto -y
+
+# Do the same in QEMU/KVM without rebooting Linux
+./ved -b powershell -p /dev/nvme0n1p3 --auto-vm -y
+
+# Read the result after Linux comes back (or after the VM shuts down)
+./ved -b powershell -p /dev/nvme0n1p3 --update-status
 ```
 
 ## Project layout
@@ -774,6 +1001,8 @@ lib/
   firmware.sh           OVMF, TPM, audio, render nodes, USB detection
   display.sh            display mode selection and viewer launch
   session.sh            guest desktop probing and session setup
+  windows_update.sh     offline build detection, catalog search and package staging (pure Bash)
+  windows_update_vm.sh  QEMU/KVM update flow: overlay, virtual ESP, merge and rollback
   docker/
     registry.sh         skopeo download, image cache, storage helpers
     image.sh            OCI manifest/config metadata and platform checks
@@ -851,7 +1080,8 @@ The container runs `tests/run.sh --ci`; no devices, mounts or `sudo` are needed.
 - **Windows backend helpers**:
   - mount options with and without a graphical user;
   - NTFS/BitLocker candidate detection and already-mounted partition reuse;
-  - hibernation detection via `hiberfil.sys`;
+  - safe hibernation detection via `ntfs-3g.probe` plus a strong `hiberfil.sys`
+    header check, so the file's mere presence no longer blocks write access;
   - generated `C:` PSDrive script, private PSReadLine history path, and the
     absence of root-only `/run/ved` paths in generated scripts;
   - clean `runuser` environment for both `pwsh` and Wine: `HOME`, `USER`,
@@ -977,7 +1207,20 @@ In the resulting `PS C:\>` prompt, confirm the environment with
 - **`Neither ntfs-3g nor kernel ntfs3 support is available`** — install `ntfs-3g`.
 - **`The Windows partition is hibernated`** — disable Windows Fast Startup
   (`powercfg /h off` in an elevated Windows prompt) before using
-  `--windows-write`. The partition still works read-only.
+  `--windows-write`. The partition still works read-only. If Windows was shut
+  down cleanly and you still see this message, install `ntfs-3g` so VED can use
+  `ntfs-3g.probe` instead of relying on the `hiberfil.sys` header fallback.
+- **`QEMU/KVM and qemu-img are required for the virtual-machine Windows Update mode`**
+  (`--auto-vm`) — install the QEMU system emulator, `qemu-img` and OVMF; see the
+  dependency table. This mode deliberately does not use `efibootmgr`.
+- **`Could not find the Windows boot loader in the EFI partition of the selected disk`**
+  (`--auto-vm`) — the selected disk's ESP must contain
+  `\EFI\Microsoft\Boot\bootmgfw.efi`. VED copies it into a temporary virtual
+  ESP; it never writes to the host's firmware boot entries.
+- **`The VM did not write a Windows Update result`** — check
+  `VEDUpdates\ved-auto-apply.log` and `ved-update-discovery.log` on the Windows
+  partition. VED restores the original partition bytes and removes the one-shot
+  startup entry before reporting failure.
 - **`PowerShell 7 (pwsh) is not installed`** — see
   [Installing pwsh](#installing-pwsh). `ved` prints the same distro-specific
   steps and deliberately never auto-installs it. `--shell cmd` only needs

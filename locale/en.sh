@@ -71,10 +71,17 @@ Common options:
       --render-node DEV Force a DRM render node, for example /dev/dri/renderD128
       --user NAME       User to use inside a chroot or nspawn container
   -c, --command CMD     Command to run in the chroot, nspawn or powershell backend
-      --shell NAME      powershell backend: pwsh or cmd (default: pwsh)
+      --shell NAME      powershell backend: pwsh, cmd or update (default: pwsh)
       --windows-write   Mount the Windows partition read-write (default: read-only)
       --windows-ro      Force read-only (useful to override a config file)
       --windows-drive L Drive letter for the partition in pwsh (default: C)
+      --auto            Windows Update: check, download, reboot into Windows,
+                        apply the update and reboot back into Linux
+      --auto-vm         Windows Update in QEMU/KVM: stage updates, boot a copy of
+                        Windows in a VM, apply them and keep Linux running
+      --kb KB[,KB]      Restrict the automatic catalog search to specific KB(s)
+                        (implies --auto)
+      --update-status   Print the result of the last automatic Windows Update
       --graphical       Bind the host display and audio into chroot/nspawn
       --boot            Boot the guest with systemd-nspawn instead of a command
       --session MODE    chroot/nspawn: shell, app, desktop or system (default: ask)
@@ -348,10 +355,18 @@ Other options:
     [select_shell]="Which Windows shell do you want?"
     [shell_pwsh]="PowerShell 7 (native pwsh, no VM)"
     [shell_cmd]="cmd (Wine compatibility layer, no VM)"
+    [shell_update]="Windows Update prep (pwsh with network, stage packages for offline apply)"
+    [shell_update_auto]="Automatic Windows Update (check, download, install and reboot; fully closed)"
+    [shell_update_auto_vm]="Automatic Windows Update in QEMU/KVM (Linux is never rebooted)"
     [select_shell_prompt]="Option [1]: "
     [shell_invalid]="Invalid Windows shell: %s"
     [shell_user_invalid]="Could not determine the home directory for user: %s"
     [windows_drive_invalid]="Invalid Windows drive letter: %s"
+    [windows_update_kb_invalid]="Invalid KB number list: %s"
+    [windows_update_powershell_only]="Windows Update options require the powershell backend."
+    [windows_update_auto_conflict]="--auto and --update-status cannot be used together."
+    [windows_update_auto_shell_conflict]="--auto requires the update shell."
+    [windows_update_auto_requires_write]="--auto needs write access to the Windows partition. Do not combine it with --windows-ro."
     [windows_no_partition]="No NTFS or BitLocker partition was found on: %s"
     [windows_partitions]="Detected Windows partitions:"
     [windows_select_partition]="Which Windows partition do you want to use? [1]: "
@@ -362,7 +377,7 @@ Other options:
     [windows_temp_failed]="Could not prepare the temporary Windows shell directory: %s"
     [windows_bitlocker]="Partition %s is BitLocker-encrypted. Unlock it first (for example with dislocker) and pass the unlocked device with --partition."
     [windows_ntfs_missing]="Neither ntfs-3g nor kernel ntfs3 support is available. Install ntfs-3g."
-    [windows_hibernated]="The Windows partition is hibernated (Fast Startup is enabled). Disable Fast Startup in Windows, or leave the partition read-only."
+    [windows_hibernated]="The Windows partition is hibernated or cannot be mounted read-write safely (Fast Startup). Shut Windows down cleanly and disable Fast Startup, or leave the partition read-only."
     [windows_writable_warning]="WARNING: changes will be written directly to the Windows partition."
     [windows_write_existing_mount]="The partition is already mounted; read-write settings cannot be changed. Using the existing mount."
     [windows_using_existing_mount]="Using the existing mount point: %s"
@@ -375,6 +390,54 @@ Other options:
     [powershell_profile]="Mapping drive %s: to the Windows partition."
     [powershell_shell]="Opening an interactive PowerShell prompt."
     [powershell_command]="Running PowerShell command: %s"
+    [powershell_update_shell]="Opening the Windows Update preparation terminal. Updates cannot be applied from Linux; run the generated script after booting Windows."
+    [powershell_update_command]="Running Windows Update preparation command: %s"
+    [powershell_update_stage_ro]="The Windows partition is read-only; packages will be staged in a temporary directory. Use --windows-write to stage them on the Windows partition."
+    [powershell_update_stage_failed]="Could not create the staging directory on the Windows partition: %s"
+    [windows_update_dry_run]="Dry run: no packages will be downloaded and the machine will not reboot."
+    [windows_update_checking]="Checking the offline Windows build and the Microsoft Update Catalog..."
+    [windows_update_discovery_failed]="Could not check or stage the Windows Update packages. See ved-update-discovery.log in the staging directory."
+    [windows_update_plan_invalid]="The staged Windows Update plan contains invalid values; nothing was applied."
+    [windows_update_up_to_date]="Windows is already at the newest available cumulative update; no reboot is needed."
+    [windows_update_found]="Found %s for the offline Windows build. Staging %s package(s)."
+    [windows_update_auto_warning]="AUTOMATIC WINDOWS UPDATE: ved will change Windows startup state, reboot into Windows, apply the staged update and reboot back into Linux."
+    [windows_update_auto_confirm]="Proceed with the automatic update? [y/N]: "
+    [windows_update_apply_ready]="Prepared the elevated Windows startup script: %s"
+    [windows_update_http_missing]="curl or wget is required for automatic Windows Update package discovery."
+    [windows_update_uefi_missing]="Automatic Windows Update requires UEFI with efibootmgr and a Windows Boot Manager entry."
+    [windows_update_efibootmgr_missing]="efibootmgr is required for automatic Windows Update. Install the efibootmgr package, or allow VED to install dependencies."
+    [windows_update_boot_entry_missing]="No UEFI Windows Boot Manager entry was found. Check 'efibootmgr -v' and add or repair the Windows boot entry."
+    [windows_update_creating_boot_entry]="No Windows Boot Manager entry exists; creating one from the EFI partition of the selected disk..."
+    [windows_update_boot_entry_created]="Created UEFI Windows Boot Manager entry: Boot%s"
+    [windows_update_boot_entry_create_failed]="Could not create a Windows Boot Manager UEFI entry. Check the EFI partition of the selected disk and run 'efibootmgr -v'."
+    [windows_update_boot_entry_dry_run]="A Windows Boot Manager UEFI entry would be created from the selected disk."
+    [windows_update_bootnext_busy]="UEFI BootNext is already set to Boot%s; clear it before using --auto."
+    [windows_update_boot_entry_found]="Windows Boot Manager UEFI entry: Boot%s"
+    [windows_update_setting_bootnext]="Setting one-shot UEFI BootNext to Windows..."
+    [windows_update_bootnext_failed]="Could not set UEFI BootNext to the Windows Boot Manager."
+    [windows_update_boot_restore_ready]="Saved the original UEFI boot order; a one-shot Linux service will restore it after the return boot."
+    [windows_update_boot_restore_unavailable]="Could not prepare automatic boot-order restoration; check UEFI BootOrder if the machine does not return to Linux."
+    [windows_update_boot_restore_failed]="Could not prepare the one-shot Linux boot-order restore service."
+    [windows_update_rebooting]="Windows Update is staged. Rebooting into Windows now; the machine will return to Linux after the update."
+    [windows_update_reboot_failed]="Could not reboot the machine. The Windows startup entry is still prepared."
+    [windows_update_gpo_failed]="Could not prepare the one-shot Windows startup script."
+    [windows_update_vm_warning]="AUTOMATIC WINDOWS UPDATE IN QEMU/KVM: ved will stage the update, boot a private copy of this disk in a VM and apply it there. The Linux host and its UEFI boot order are not rebooted or changed."
+    [windows_update_vm_confirm]="Proceed with the virtual-machine update? [y/N]: "
+    [windows_update_vm_discovering]="Checking the offline Windows build and the Microsoft Update Catalog..."
+    [windows_update_vm_qemu_missing]="QEMU/KVM and qemu-img are required for the virtual-machine Windows Update mode."
+    [windows_update_vm_partition_failed]="Could not determine the byte range of the selected Windows partition."
+    [windows_update_vm_bootloader_failed]="Could not find the Windows boot loader in the EFI partition of the selected disk."
+    [windows_update_vm_creating_overlay]="Creating a QEMU copy-on-write overlay of %s..."
+    [windows_update_vm_esp_ready]="Prepared a temporary virtual EFI partition for the VM."
+    [windows_update_vm_starting]="Starting Windows in QEMU/KVM. Wait for the update to finish and the VM to shut down..."
+    [windows_update_vm_no_qemu]="The virtual machine did not finish cleanly."
+    [windows_update_vm_merging]="Applying %s changed disk range(s) back to the Windows partition..."
+    [windows_update_vm_restoring]="The VM update did not complete; restoring the original Windows partition."
+    [windows_update_vm_no_status]="The VM did not write a Windows Update result. The original partition was restored."
+    [windows_update_vm_failed]="Automatic Windows Update in QEMU/KVM failed. The host was not rebooted."
+    [windows_update_vm_success]="Automatic Windows Update in QEMU/KVM completed. The Linux host was not rebooted."
+    [windows_update_status_title]="Last automatic Windows Update result:"
+    [windows_update_no_status]="No automatic Windows Update status file was found on the Windows partition."
     [wine_needs_user]="Wine cannot run as root. Run ved with sudo from your normal user account to use the cmd shell."
     [wine_prefix_failed]="The Wine prefix could not be initialized; cmd may not start."
     [cmd_shell]="Opening an interactive cmd prompt (Wine). The Windows partition is drive W:."

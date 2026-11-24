@@ -13,20 +13,10 @@ docker_image_config_digest() {
     local manifest="$1"
     local value=""
 
-    if have python3; then
-        value="$(python3 - "$manifest" <<'PY'
-import json
-import sys
-
-try:
-    with open(sys.argv[1], "r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    print(data.get("config", {}).get("digest", ""))
-except Exception:
-    pass
-PY
-)"
-    fi
+    [[ -r "$manifest" ]] || return 0
+    value="$(tr -d '\r\n' <"$manifest" |
+        sed -n 's/.*"config"[[:space:]]*:[[:space:]]*{[^}]*"digest"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+        head -n1)"
     [[ -n "$value" ]] || value="$(docker_image_all_digests "$manifest" | head -n1)"
     printf '%s' "$value"
 }
@@ -35,23 +25,21 @@ docker_image_layer_digests() {
     local manifest="$1"
     local value=""
 
-    if have python3; then
-        value="$(python3 - "$manifest" <<'PY'
-import json
-import sys
-
-try:
-    with open(sys.argv[1], "r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    for layer in data.get("layers", []) or []:
-        digest = layer.get("digest")
-        if digest:
-            print(digest)
-except Exception:
-    pass
-PY
-)"
-    fi
+    [[ -r "$manifest" ]] || return 0
+    value="$(tr -d '\r\n' <"$manifest" | awk '
+        {
+            if (!match($0, /"layers"[[:space:]]*:[[:space:]]*\[/)) next
+            rest = substr($0, RSTART + RLENGTH)
+            sub(/\].*/, "", rest)
+            while (match(rest, /"digest"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
+                item = substr(rest, RSTART, RLENGTH)
+                sub(/^[^"]*"[^"]*"[[:space:]]*:[[:space:]]*"/, "", item)
+                sub(/"$/, "", item)
+                print item
+                rest = substr(rest, RSTART + RLENGTH)
+            }
+        }
+    ')"
     if [[ -n "$value" ]]; then
         printf '%s\n' "$value"
     else
@@ -68,34 +56,17 @@ docker_image_config_path() {
     docker_blob_path "$dir" "$digest"
 }
 
+# Flattening the JSON makes these simple scanners work for both compact and
+# pretty-printed config blobs, without a JSON library or an interpreter.
 docker_json_scalar() {
     local file="$1"
     local key="$2"
     local value=""
 
     [[ -r "$file" ]] || return 0
-
-    if have python3; then
-        value="$(python3 - "$file" "$key" <<'PY'
-import json
-import sys
-
-try:
-    with open(sys.argv[1], "r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    section = data.get("config") or {}
-    value = section.get(sys.argv[2], data.get(sys.argv[2], ""))
-    if value is not None:
-        print(value)
-except Exception:
-    pass
-PY
-)"
-    else
-        value="$(sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\\1/p" \
-            "$file" | head -n1)"
-    fi
-
+    value="$(tr -d '\r\n' <"$file" |
+        sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\\1/p" |
+        head -n1)"
     printf '%s' "$value"
 }
 
@@ -104,28 +75,19 @@ docker_json_array_values() {
     local key="$2"
 
     [[ -r "$file" ]] || return 0
-
-    if have python3; then
-        python3 - "$file" "$key" <<'PY'
-import json
-import sys
-
-try:
-    with open(sys.argv[1], "r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    section = data.get("config") or {}
-    for item in section.get(sys.argv[2], data.get(sys.argv[2], [])) or []:
-        print(item)
-except Exception:
-    pass
-PY
-    else
-        sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\[\(.*\)\].*/\\1/p" "$file" |
-            head -n1 |
-            tr ',' '\n' |
-            sed 's/^[[:space:]]*"//; s/"[[:space:]]*$//' |
-            sed '/^$/d'
-    fi
+    tr -d '\r\n' <"$file" | awk -v key="$key" '
+        {
+            pattern = "\"" key "\"[[:space:]]*:[[:space:]]*\\["
+            if (!match($0, pattern)) next
+            rest = substr($0, RSTART + RLENGTH)
+            sub(/\].*/, "", rest)
+            while (match(rest, /"[^"]*"/)) {
+                item = substr(rest, RSTART + 1, RLENGTH - 2)
+                if (length(item)) print item
+                rest = substr(rest, RSTART + RLENGTH)
+            }
+        }
+    '
 }
 
 docker_env_is_reserved() {

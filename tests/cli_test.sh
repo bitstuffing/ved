@@ -54,6 +54,7 @@ fail() {
 }
 
 run_directory_isolation() (
+    set -e
     # shellcheck source=../lib/core.sh
     source "$PROJECT_ROOT/lib/core.sh"
     t() { printf '%s' "$1"; }
@@ -75,6 +76,7 @@ run_directory_isolation() (
 )
 
 run_windows_helpers() (
+    set -e
     # shellcheck source=../lib/core.sh
     source "$PROJECT_ROOT/lib/core.sh"
     t() { printf '%s' "$1"; }
@@ -165,8 +167,32 @@ run_windows_helpers() (
     if powershell_is_hibernated "$fake_win"; then
         return 1
     fi
+
+    # An empty hiberfil.sys is just an allocation marker; it exists on cleanly
+    # shut down systems with hibernation enabled and must not block writes.
     : >"$fake_win/hiberfil.sys"
+    if powershell_is_hibernated "$fake_win"; then
+        return 1
+    fi
+    truncate -s 1048576 "$fake_win/hiberfil.sys"
+    if powershell_is_hibernated "$fake_win"; then
+        return 1
+    fi
+    printf 'hibr' | dd of="$fake_win/hiberfil.sys" bs=1 count=4 conv=notrunc \
+        status=none
     powershell_is_hibernated "$fake_win"
+
+    # Without a probe, only the strong header check blocks RW access.
+    powershell_volume_writable '/dev/fake' "$fake_win" && return 1
+    : >"$fake_win/hiberfil.sys"
+    powershell_volume_writable '/dev/fake' "$fake_win"
+
+    # The probe is authoritative: a clean probe result overrides the fallback.
+    printf 'hibr' | dd of="$fake_win/hiberfil.sys" bs=1 count=4 conv=notrunc \
+        status=none
+    ntfs-3g.probe() { return 0; }
+    powershell_volume_writable '/dev/fake' "$fake_win"
+    unset -f ntfs-3g.probe
 
     have() { [[ "$1" == "pwsh" ]]; }
     VED_DRY_RUN=1
@@ -188,9 +214,563 @@ run_windows_helpers() (
     [[ "$dry_output" == *"HOME=$expected_home"* ]]
     [[ "$dry_output" == *"WINEPREFIX=$expected_home/.local/share/ved/wine"* ]]
     [[ "$dry_output" != *"HOME=/root"* ]]
+
+    # Update preparation mode uses native pwsh and never starts Wine.
+    VED_WINDOWS_MOUNT="$fake_win"
+    VED_UPDATE_STAGE_DIR="$script_dir/updates"
+    VED_UPDATE_WINDOWS_PATH=""
+    VED_UPDATE_APPLY_SCRIPT="$VED_UPDATE_STAGE_DIR/apply-ved-updates.cmd"
+    mkdir -p "$VED_UPDATE_STAGE_DIR"
+    local helper
+    helper="$(powershell_write_update_helper)"
+    [[ -f "$helper" ]]
+    grep -Fq 'function Show-VedUpdateHelp' "$helper"
+    grep -Fq 'function Get-VedWindowsBuild' "$helper"
+    grep -Fq 'function Save-VedUpdatePackage' "$helper"
+    grep -Fq 'function Write-VedApplyScript' "$helper"
+    dry_output="$(powershell_run_update "$profile" "$helper" "")"
+    [[ "$dry_output" == *"VED_WINDOWS_MOUNT=$fake_win"* ]]
+    [[ "$dry_output" == *"VED_UPDATE_STAGE_DIR=$VED_UPDATE_STAGE_DIR"* ]]
+    [[ "$dry_output" == *"-File $script_dir/ved-update-shell.ps1"* ]]
+    grep -Fq 'Show-VedUpdateHelp' "$script_dir/ved-update-shell.ps1"
+    [[ "$dry_output" != *"wine"* ]]
+
+    HTTPS_PROXY="http://proxy.example:3128"
+    dry_output="$(powershell_run_update "$profile" "$helper" "")"
+    [[ "$dry_output" == *"HTTPS_PROXY=http://proxy.example:3128"* ]]
+    unset HTTPS_PROXY
+)
+
+run_windows_update_auto_helpers() (
+    set -e
+    # shellcheck source=../lib/core.sh
+    source "$PROJECT_ROOT/lib/core.sh"
+    # shellcheck source=../lib/disks.sh
+    source "$PROJECT_ROOT/lib/disks.sh"
+    # shellcheck source=../lib/backends/powershell.sh
+    source "$PROJECT_ROOT/lib/backends/powershell.sh"
+
+    t() {
+        case "$1" in
+            windows_update_creating_boot_entry)
+                printf 'creating Windows boot entry' ;;
+            windows_update_boot_entry_created)
+                printf 'created Windows boot entry %s' "$2" ;;
+            *) printf '%s' "$1" ;;
+        esac
+    }
+
+    expect_equal() {
+        [[ "$1" == "$2" ]] || {
+            printf 'expected %q, got %q\n' "$2" "$1" >&2
+            return 1
+        }
+    }
+
+    expect_contains() {
+        [[ "$1" == *"$2"* ]] || {
+            printf 'output does not contain %q\n' "$2" >&2
+            return 1
+        }
+    }
+
+    expect_file_contains() {
+        grep -Fq -- "$1" "$2" || {
+            printf '%s does not contain %s\n' "$2" "$1" >&2
+            return 1
+        }
+    }
+
+    local root="$TMPDIR_TEST/update-auto-win"
+    local stage="$TMPDIR_TEST/update-auto-stage"
+    local scripts="$root/Windows/System32/GroupPolicy/Machine/Scripts/scripts.ini"
+    mkdir -p "$root/VEDUpdates" "$stage" "$root/Windows/System32/GroupPolicy/Machine/Scripts/Startup"
+    VED_WINDOWS_MOUNT="$root"
+    VED_UPDATE_STAGE_DIR="$stage"
+    VED_UPDATE_WINDOWS_PATH='C:\VEDUpdates'
+    VED_ROOT="$PROJECT_ROOT"
+    VED_DRY_RUN=1
+
+    printf 'VED_UPDATE_KB=KB5132061\n' >"$stage/plan.env"
+    expect_equal "$(powershell_plan_value VED_UPDATE_KB "$stage/plan.env")" KB5132061
+
+    printf 'SUCCESS KB5132061 10.0.26100.9974\n' >"$root/VEDUpdates/ved-update-status.txt"
+    local status_output
+    status_output="$(powershell_show_update_status)"
+    expect_contains "$status_output" 'SUCCESS KB5132061'
+
+    local boot_next_line='BootNext: 0003'
+    local boot_entry_line='Boot0002* Windows Boot Manager'
+    local verbose_windows_line='Boot0002* Mi Windows HD(1,GPT,bbbb)/File(\\EFI\\Microsoft\\Boot\\bootmgfw.efi)'
+    efibootmgr() {
+        if [[ "${1:-}" == "-v" ]]; then
+            # A renamed entry must still be found through bootmgfw.efi.
+            cat <<EOF
+BootCurrent: 0001
+BootOrder: 0002,0001
+Boot0001* Linux HD(1,GPT,aaaa)/File(\\EFI\\linux\\grubx64.efi)
+$verbose_windows_line
+Boot0003* Another OS HD(1,GPT,cccc)/File(\\EFI\\other\\boot.efi)
+EOF
+        elif [[ "${1:-}" == "-c" ]]; then
+            printf '%s\n' "$*" >"$TMPDIR_TEST/efibootmgr-create.log"
+            printf 'Boot000A* Windows Boot Manager (VED)\nBootOrder: 0002,0001\n'
+        elif [[ "${1:-}" == "-B" ]]; then
+            printf '%s\n' "$*" >"$TMPDIR_TEST/efibootmgr-delete.log"
+        elif (($# == 0)); then
+            cat <<EOF
+BootCurrent: 0001
+$boot_next_line
+BootOrder: 0002,0001
+Boot0001* Linux
+$boot_entry_line
+Boot0003* Another OS
+EOF
+        else
+            printf 'efibootmgr %s\n' "$*"
+        fi
+    }
+    expect_equal "$(powershell_windows_boot_entry)" 0002
+    expect_equal "$(powershell_boot_next_value)" 0003
+
+    printf '[General]\r\nVersion=7\r\n' \
+        >"$root/Windows/System32/GroupPolicy/gpt.ini"
+    printf '[Startup]\r\n101CmdLine=C:\\Windows\\System32\\GroupPolicy\\Machine\\Scripts\\Startup\\ved-auto-update.cmd\r\n101Parameters=\r\n' >"$scripts"
+    powershell_write_auto_apply KB5132061 10.0.26100.9974 \
+        'windows11.0-kb5132061-x64_test.msu windows11.0-kb5043080-x64_test.msu'
+    expect_file_contains 'windows11.0-kb5132061-x64_test.msu' "$stage/ved-auto-apply.ps1"
+    expect_file_contains 'windows11.0-kb5043080-x64_test.msu' "$stage/ved-auto-apply.ps1"
+    expect_file_contains 'Version=8' "$root/Windows/System32/GroupPolicy/gpt.ini"
+    expect_file_contains '100CmdLine=C:\Windows\System32\GroupPolicy\Machine\Scripts\Startup\ved-auto-update.cmd' "$scripts"
+    if grep -Fq '101CmdLine=' "$scripts"; then
+        printf 'stale startup entry was not removed\n' >&2
+        return 1
+    fi
+    expect_file_contains '$dism /Online /Add-Package' "$stage/ved-auto-apply.ps1"
+    expect_file_contains 'Remove-VedStartupEntry' "$stage/ved-auto-apply.ps1"
+    expect_file_contains 'shutdown.exe' "$stage/ved-auto-apply.ps1"
+    expect_file_contains '/r /t 20' "$stage/ved-auto-apply.ps1"
+
+    VED_DRY_RUN=0
+    powershell_write_auto_apply KB5132061 10.0.26100.9974 \
+        'windows11.0-kb5132061-x64_test.msu' shutdown
+    VED_DRY_RUN=1
+    expect_file_contains '/s /t 20' "$stage/ved-auto-apply.ps1"
+
+    powershell_validate_auto_plan KB5132061 10.0.26100.9974 \
+        'windows11.0-kb5132061-x64_test.msu'
+    powershell_validate_auto_plan 'KB5132061,KB5132060' 10.0.26100.9974 \
+        'windows11.0-kb5132061-x64_test.msu'
+    VED_DRY_RUN=0
+    powershell_remove_windows_startup
+    VED_DRY_RUN=1
+    [[ ! -e "$root/Windows/System32/GroupPolicy/Machine/Scripts/Startup/ved-auto-update.cmd" ]]
+    if grep -Fq '100CmdLine=' "$scripts"; then
+        printf 'rollback did not remove the startup entry\n' >&2
+        return 1
+    fi
+
+    boot_next_line=''
+    local auto_output
+    auto_output="$(powershell_update_auto)"
+    expect_contains "$auto_output" 'lib/windows_update.sh'
+    expect_contains "$auto_output" '--plan-only'
+    expect_contains "$auto_output" 'efibootmgr -o 0001,0002'
+    expect_contains "$auto_output" 'efibootmgr -n 0002'
+    expect_contains "$auto_output" 'systemctl reboot'
+
+    # With no Windows boot entry, VED creates one from the selected disk's ESP.
+    local esp="$TMPDIR_TEST/windows-esp"
+    mkdir -p "$esp/EFI/Microsoft/Boot"
+    : >"$esp/EFI/Microsoft/Boot/bootmgfw.efi"
+    lsblk() {
+        case "$*" in
+            *NAME,FSTYPE,PARTTYPE*)
+                printf '/dev/fake0p1 vfat c12a7328-f81f-11d2-ba4b-00a0c93ec93b\n'
+                ;;
+            *PKNAME,PARTN*) printf '/dev/fake0 1\n' ;;
+        esac
+    }
+    findmnt() { printf '%s\n' "$esp"; }
+    systemctl() { return 0; }
+    expect_equal "$(powershell_windows_bootloader /dev/fake0)" \
+        '/dev/fake0p1|\EFI\Microsoft\Boot\bootmgfw.efi' || return 1
+
+    boot_entry_line=''
+    verbose_windows_line=''
+    VED_UPDATE_BOOT_ENTRY=''
+    VED_CREATE_WIN_BOOT_ENTRY=0
+    VED_CREATED_WIN_BOOT_ENTRY=''
+    VED_DRY_RUN=0
+    VED_DISK='/dev/fake0'
+    rm -f "$TMPDIR_TEST/efibootmgr-create.log" "$TMPDIR_TEST/efibootmgr-delete.log"
+    powershell_ensure_boot_entry
+    expect_equal "$VED_UPDATE_BOOT_ENTRY" 000A || return 1
+    expect_equal "$VED_CREATE_WIN_BOOT_ENTRY" 1 || return 1
+    expect_file_contains '-d /dev/fake0 -p 1' \
+        "$TMPDIR_TEST/efibootmgr-create.log" || return 1
+    expect_file_contains 'bootmgfw.efi' \
+        "$TMPDIR_TEST/efibootmgr-create.log" || return 1
+    powershell_rollback_auto
+    expect_file_contains '-B -b 000A' \
+        "$TMPDIR_TEST/efibootmgr-delete.log" || return 1
+    expect_equal "$VED_CREATE_WIN_BOOT_ENTRY" 0 || return 1
+    expect_equal "$VED_CREATED_WIN_BOOT_ENTRY" '' || return 1
+)
+
+run_windows_update_bash_helper() (
+    set -e
+    # shellcheck source=../lib/windows_update.sh
+    source "$PROJECT_ROOT/lib/windows_update.sh"
+
+    expect_equal() {
+        [[ "$1" == "$2" ]] || {
+            printf 'expected %q, got %q\n' "$2" "$1" >&2
+            return 1
+        }
+    }
+
+    expect_contains() {
+        [[ "$1" == *"$2"* ]] || {
+            printf 'output does not contain %q\n' "$2" >&2
+            return 1
+        }
+    }
+
+    expect_file_contains() {
+        grep -Fq -- "$1" "$2" || {
+            printf '%s does not contain %s\n' "$2" "$1" >&2
+            return 1
+        }
+    }
+
+    local fixture="$TMPDIR_TEST/update-bash-helper"
+    mkdir -p "$fixture/stage" "$fixture/win/Windows/servicing/Packages"
+    local rows="$fixture/rows.tsv"
+
+    expect_equal "$(windows_update_parse_build 26100)" '10.0.26100.0'
+    expect_equal "$(windows_update_parse_build 26100.7840)" '10.0.26100.7840'
+    expect_equal "$(windows_update_parse_build 26100.9711.1.30)" \
+        '10.0.26100.9711'
+    expect_equal "$(windows_update_product 10.0.26100.7840)" 'Windows 11'
+    expect_equal "$(windows_update_product 26100.9711.1.30)" 'Windows 11'
+    expect_equal "$(windows_update_product 10.0.19045.3803)" 'Windows 10'
+    expect_equal "$(windows_update_display_version 26100)" '24H2'
+    windows_update_version_ge 10.0.26100.9974 10.0.26100.7840
+    windows_update_version_ge 10.0.26100.7840 10.0.26100.7840
+    if windows_update_version_ge 10.0.26100.7840 10.0.26100.9974; then
+        return 1
+    fi
+    expect_equal "$(windows_update_urlencode 'KB5132061, KB list')" \
+        'KB5132061%2C+KB+list'
+
+    # A synthetic PE image exercises the byte-level version parser without
+    # needing a real Windows installation.
+    local pe="$fixture/ntoskrnl.exe"
+    {
+        printf 'MZ'
+        dd if=/dev/zero bs=1 count=58 status=none
+        printf '\x80\x00\x00\x00'
+        dd if=/dev/zero bs=1 count=64 status=none
+        printf 'PE\x00\x00\x64\x86'
+        dd if=/dev/zero bs=1 count=122 status=none
+        printf '\xbd\x04\xef\xfe\x00\x00\x00\x00\x00\x00\x0a\x00\xa0\x1e\xf4\x65\x00\x00\x0a\x00\xa0\x1e\xf4\x65'
+        dd if=/dev/zero bs=1 count=64 status=none
+    } >"$pe"
+    windows_update_pe_version "$pe"
+    expect_equal "$WU_PE_VERSION" '10.0.26100.7840'
+    expect_equal "$WU_PE_ARCH" 'x64'
+
+    : >"$fixture/win/Windows/servicing/Packages/Package_for_RollupFix~31bf3856ad364e35~amd64~~10.0.26100.7840.mum"
+    expect_equal "$(windows_update_version_from_packages "$fixture/win")" \
+        '10.0.26100.7840'
+    mkdir -p "$fixture/mum/Windows/servicing/Packages"
+    : >"$fixture/mum/Windows/servicing/Packages/Package_for_RollupFix~31bf3856ad364e35~amd64~~26100.9711.1.30.mum"
+    expect_equal "$(windows_update_version_from_packages "$fixture/mum")" \
+        '10.0.26100.9711'
+    windows_update_offline_state "$fixture/mum"
+    expect_equal "$WU_CURRENT_VERSION" '10.0.26100.9711'
+    expect_equal "$WU_PRODUCT" 'Windows 11'
+    windows_update_offline_state "$fixture/win" '26200.9974' 'x86'
+    expect_equal "$WU_CURRENT_VERSION" '10.0.26200.9974'
+    expect_equal "$WU_ARCH" 'x86'
+    expect_equal "$WU_PRODUCT" 'Windows 11'
+
+    # Catalog rows: English/Italian titles, wrong architecture and wrong build
+    # family must all be handled without a locale-specific parser.
+    cat >"$fixture/search.html" <<'HTML'
+<table id="ctl00_catalogBody_updateMatches">
+<tr id="11111111-1111-1111-1111-111111111111_R0">
+<td></td><td>2026-11 Cumulative Update for Windows 11, version 24H2 for x64-based Systems (KB5132061) (26100.9974)</td><td>Windows 11</td><td>Security Updates</td><td>11/1/2026</td><td>n/a</td><td>1 MB</td><td><input /></td>
+</tr>
+<tr id="22222222-2222-2222-2222-222222222222_R1">
+<td></td><td>2026-11 Aggiornamento cumulativo per Windows 11, version 24H2 per sistemi basati su arm64 (KB5132061) (26100.9974)</td><td>Windows 11</td><td>Security Updates</td><td>11/1/2026</td><td>n/a</td><td>1 MB</td><td><input /></td>
+</tr>
+<tr id="33333333-3333-3333-3333-333333333333_R2">
+<td></td><td>2026-11 Cumulative Update for Windows 11, version 25H2 for x64-based Systems (KB5132061) (26200.9974)</td><td>Windows 11</td><td>Security Updates</td><td>11/1/2026</td><td>n/a</td><td>1 MB</td><td><input /></td>
+</tr>
+<tr id="44444444-4444-4444-4444-444444444444_R3">
+<td></td><td>2026-11 Cumulative Update for Windows 11, version 24H2 for x64-based Systems (KB5132060) (26100.9974)</td><td>Windows 11</td><td>Security Updates</td><td>11/1/2026</td><td>n/a</td><td>1 MB</td><td><input /></td>
+</tr>
+</table>
+HTML
+    windows_update_parse_search_rows <"$fixture/search.html" >"$rows"
+    expect_equal "$(wc -l <"$rows" | tr -d ' ')" '4'
+
+    WU_ARCH='x64'
+    WU_PRODUCT='Windows 11'
+    WU_CURRENT_VERSION='10.0.26100.7840'
+    local candidates
+    mapfile -t candidates < <(
+        windows_update_filter_rows "$rows" ''
+    )
+    expect_equal "${#candidates[@]}" '2'
+    expect_contains "${candidates[0]}" '11111111-1111-1111-1111-111111111111'
+    mapfile -t candidates < <(
+        windows_update_filter_rows "$rows" 'KB5132060'
+    )
+    expect_equal "${#candidates[@]}" '1'
+    expect_contains "${candidates[0]}" '44444444-4444-4444-4444-444444444444'
+
+    # Only Microsoft-hosted MSU/CAB files may be staged.
+    windows_update_http_post() {
+        printf '%s\n' \
+            "downloadInformation[0].files[0].url = 'https://catalog.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/a/public/windows11.0-kb5043080-x64_a.msu';" \
+            "downloadInformation[0].files[1].url = 'https://download.windowsupdate.com/d/msdownload/update/software/secu/2026/11/windows11.0-kb5132061-x64_b.msu';" \
+            "downloadInformation[0].files[2].url = 'https://evil.example.com/pkg.msu';"
+    }
+    local urls
+    urls="$(windows_update_download_urls '11111111-1111-1111-1111-111111111111')"
+    expect_contains "$urls" 'windows11.0-kb5043080-x64_a.msu'
+    expect_contains "$urls" 'windows11.0-kb5132061-x64_b.msu'
+    if [[ "$urls" == *'evil.example.com'* ]]; then
+        return 1
+    fi
+
+    WU_PACKAGE_NAMES='windows11.0-kb5043080-x64_a.msu windows11.0-kb5132061-x64_b.msu'
+    WU_PACKAGE_URLS=$'https://download.windowsupdate.com/a.msu\nhttps://download.windowsupdate.com/b.msu'
+    windows_update_write_plan "$fixture/stage" '10.0.26100.7840' \
+        '10.0.26100.9974' 'KB5132061' 'test query'
+    expect_file_contains 'VED_UPDATE_PACKAGE_COUNT=2' \
+        "$fixture/stage/ved-update-plan.env"
+    expect_file_contains 'windows11.0-kb5132061-x64_b.msu' \
+        "$fixture/stage/ved-update-plan.env"
+    expect_file_contains '"kb": "KB5132061"' "$fixture/stage/ved-update-plan.json"
+    expect_file_contains '"name":"windows11.0-kb5043080-x64_a.msu"' \
+        "$fixture/stage/ved-update-plan.json"
+)
+
+run_windows_update_vm_helpers() (
+    set -e
+    # shellcheck source=../lib/core.sh
+    source "$PROJECT_ROOT/lib/core.sh"
+    # shellcheck source=../lib/disks.sh
+    source "$PROJECT_ROOT/lib/disks.sh"
+    # shellcheck source=../lib/backends/powershell.sh
+    source "$PROJECT_ROOT/lib/backends/powershell.sh"
+    # shellcheck source=../lib/backends/qemu.sh
+    source "$PROJECT_ROOT/lib/backends/qemu.sh"
+    # shellcheck source=../lib/windows_update_vm.sh
+    source "$PROJECT_ROOT/lib/windows_update_vm.sh"
+
+    t() { printf '%s' "$1"; }
+    info() { :; }
+    die() {
+        printf 'die: %s\n' "$*" >&2
+        return 1
+    }
+    have() { return 0; }
+    mount() { return 0; }
+    sync() { return 0; }
+    mkfs.vfat() { return 0; }
+    umount_path() { :; }
+    cleanup_add_dir() { :; }
+    cleanup_add_file() { :; }
+    cleanup_add_mount() { :; }
+    du() { printf '1\t%s\n' "${2:-/}"; }
+
+    expect_equal() {
+        [[ "$1" == "$2" ]] || {
+            printf 'expected %q, got %q\n' "$2" "$1" >&2
+            return 1
+        }
+    }
+    expect_contains() {
+        [[ "$1" == *"$2"* ]] || {
+            printf 'output does not contain %q\n' "$2" >&2
+            return 1
+        }
+    }
+    expect_file_contains() {
+        grep -Fq -- "$1" "$2" || {
+            printf '%s does not contain %s\n' "$2" "$1" >&2
+            return 1
+        }
+    }
+
+    local fixture="$TMPDIR_TEST/update-vm"
+    mkdir -p "$fixture/esp/EFI/Microsoft/Boot" "$fixture/stage" \
+        "$fixture/vm/ved-vm-esp-copy"
+    : >"$fixture/esp/EFI/Microsoft/Boot/bootmgfw.efi"
+
+    findmnt() { printf '%s\n' "$fixture/esp"; }
+    lsblk() {
+        case "$*" in
+            *PKNAME*) printf 'fake0\n' ;;
+            *NAME*) printf '/dev/fake0\n' ;;
+            *) printf '1048576 3145728\n' ;;
+        esac
+    }
+
+    expect_equal "$(powershell_vm_partition_range /dev/fake0p4)" \
+        '1048576 3145728' || return 1
+
+    VED_VM_DIR="$fixture/vm"
+    local esp_image
+    esp_image="$(powershell_vm_esp_image '\EFI\Microsoft\Boot\bootmgfw.efi' x86_64)" ||
+        return 1
+    [[ -f "$esp_image" ]] || return 1
+    [[ -f "$fixture/vm/ved-vm-esp-copy/EFI/Boot/BootX64.efi" ]] || return 1
+
+    local overlay="$fixture/overlay.qcow2" map="$fixture/map.txt"
+    local map_src="$fixture/map-src.txt" ranges="$fixture/ranges.txt" rows
+    : >"$overlay"
+    VM_TEST_MAP="$map_src"
+    qemu-img() {
+        [[ "${1:-}" == "map" ]] && cat "$VM_TEST_MAP"
+    }
+    cat >"$map_src" <<EOF
+Offset          Length          Mapped to       File
+0               0x100000        0               $fixture/base.raw
+0x100000        0x10000         0x50000         $overlay
+0x200000        0x10000         0x80000         $fixture/base.raw
+0x300000        0x10000         0x90000         $overlay
+EOF
+    rows="$(powershell_vm_changed_ranges "$overlay" "$map" "$ranges" \
+        1048576 3145728)" || return 1
+    expect_equal "$rows" 2 || return 1
+    expect_file_contains '1048576 65536 327680' "$ranges" || return 1
+    expect_file_contains '3145728 65536 589824' "$ranges" || return 1
+    if grep -Fq "$fixture/base.raw" "$ranges"; then
+        printf 'backing-file ranges were merged\n' >&2
+        return 1
+    fi
+
+    local disk="$fixture/disk.raw" original="$fixture/original.raw"
+    local merge_ranges="$fixture/merge-ranges.txt" backup="$fixture/backup.img"
+    dd if=/dev/zero bs=1024 count=64 2>/dev/null | tr '\0' 'A' >"$disk"
+    cp -f "$disk" "$original"
+    dd if=/dev/zero bs=1024 count=64 2>/dev/null | tr '\0' 'B' >"$overlay"
+    printf '0 65536 0\n' >"$merge_ranges"
+    : >"$backup"
+    VED_DISK="$disk"
+    powershell_vm_merge_overlay "$overlay" "$backup" "$merge_ranges" || return 1
+    cmp -s "$disk" "$overlay" || return 1
+    powershell_vm_restore_backup "$backup" "$merge_ranges" || return 1
+    cmp -s "$disk" "$original" || return 1
+
+    VED_ROOT="$PROJECT_ROOT"
+    VED_VM_DIR="$fixture/vm"
+    VED_UPDATE_STAGE_DIR="$fixture/stage"
+    VED_WINDOWS_MOUNT="$fixture/win"
+    VED_UPDATE_KB=""
+    VED_DISK='/dev/fake0'
+    VED_ARCH='x86_64'
+    VED_DRY_RUN=1
+    print_command() {
+        printf '%s ' "$@"
+        printf '\n'
+    }
+    local dry_output
+    dry_output="$(powershell_update_vm)" || return 1
+    expect_contains "$dry_output" '--plan-only' || return 1
+    expect_contains "$dry_output" 'qemu-img create -f qcow2 -b /dev/fake0' || return 1
+    if [[ "$dry_output" == *'systemctl reboot'* ||
+          "$dry_output" == *'efibootmgr'* ]]; then
+        printf 'VM dry run must not change host firmware\n' >&2
+        return 1
+    fi
+
+    display_build_args() { return 0; }
+    qemu_machine() { printf 'pc'; }
+    qemu_escape() { printf '%s' "$1"; }
+    qemu_disk_serial() { printf 'vedserial'; }
+    spice_agent_args() { :; }
+    VED_ACCEL_ACTUAL='kvm'
+    VED_CPUS='2'
+    VED_RAM='4G'
+    VED_STORAGE_OPTS=()
+    VED_OVMF_CODE='/usr/share/OVMF/OVMF_CODE.fd'
+    VED_OVMF_CODE_FORMAT='raw'
+    VED_OVMF_VARS_TEMP='/tmp/ved-vars.fd'
+    VED_OVMF_VARS_FORMAT='raw'
+    VED_IMAGE="$overlay"
+    VED_IMAGE_FORMAT='qcow2'
+    VED_ESP_IMAGE="$esp_image"
+    VED_GUEST_OS='windows'
+    VED_ARCH='x86_64'
+    VED_NETWORK='none'
+    VED_BOOT_MENU=1
+    VED_DISPLAY_ARGS=()
+    VED_AUDIO_ARGS=()
+    VED_USB_ARGS=()
+    VED_TPM_ARGS=()
+    qemu_build_args spice node || return 1
+    local qemu_args=" ${VED_QEMU_ARGS[*]} "
+    expect_contains "$qemu_args" " file=$esp_image,format=raw,if=none,id=ved-esp,readonly=on " || return 1
+    expect_contains "$qemu_args" ' virtio-blk-pci,drive=ved-esp,bootindex=0 ' || return 1
+    expect_contains "$qemu_args" " file=$overlay,format=qcow2,if=none,id=ved-disk,cache=writeback,aio=threads " || return 1
+    expect_contains "$qemu_args" ' nvme,drive=ved-disk,serial=vedserial,bootindex=1 ' || return 1
+)
+
+run_shell_auto_menu() (
+    set -e
+    # shellcheck source=../lib/core.sh
+    source "$PROJECT_ROOT/lib/core.sh"
+    # shellcheck source=../lib/ui.sh
+    source "$PROJECT_ROOT/lib/ui.sh"
+
+    t() { printf '%s' "$1"; }
+    info() { :; }
+    ask() { printf '4'; }
+
+    VED_SHELL="pwsh"
+    VED_UPDATE_AUTO=0
+    VED_WINDOWS_WRITE=0
+    VED_WINDOWS_WRITE_SET=0
+    select_shell
+    [[ "$VED_SHELL" == "update" ]]
+    [[ "$VED_UPDATE_AUTO" -eq 1 ]]
+    [[ "$VED_WINDOWS_WRITE" -eq 1 ]]
+    [[ "$VED_WINDOWS_WRITE_SET" -eq 1 ]]
+)
+
+run_shell_auto_vm_menu() (
+    set -e
+    # shellcheck source=../lib/core.sh
+    source "$PROJECT_ROOT/lib/core.sh"
+    # shellcheck source=../lib/ui.sh
+    source "$PROJECT_ROOT/lib/ui.sh"
+
+    t() { printf '%s' "$1"; }
+    info() { :; }
+    ask() { printf '5'; }
+
+    VED_SHELL="pwsh"
+    VED_UPDATE_AUTO=0
+    VED_UPDATE_VM=0
+    VED_WINDOWS_WRITE=0
+    VED_WINDOWS_WRITE_SET=0
+    select_shell
+    [[ "$VED_SHELL" == "update" ]]
+    [[ "$VED_UPDATE_AUTO" -eq 1 ]]
+    [[ "$VED_UPDATE_VM" -eq 1 ]]
+    [[ "$VED_WINDOWS_WRITE" -eq 1 ]]
+    [[ "$VED_WINDOWS_WRITE_SET" -eq 1 ]]
 )
 
 run_powershell_hint() (
+    set -e
     # shellcheck source=../lib/core.sh
     source "$PROJECT_ROOT/lib/core.sh"
     # shellcheck source=../lib/platform.sh
@@ -213,6 +793,7 @@ run_powershell_hint() (
 )
 
 run_locale_messages() (
+    set -e
     # shellcheck source=../lib/i18n.sh
     source "$PROJECT_ROOT/lib/i18n.sh"
     VED_ROOT="$PROJECT_ROOT"
@@ -220,6 +801,18 @@ run_locale_messages() (
     check_keys() {
         local key
         for key in backend_powershell backend_docker shell_user_invalid windows_temp_failed \
+                   shell_update powershell_update_shell powershell_update_command \
+                   powershell_update_stage_ro powershell_update_stage_failed \
+                   windows_update_kb_invalid windows_update_powershell_only \
+                   windows_update_auto_conflict windows_update_auto_shell_conflict \
+                   windows_update_auto_requires_write windows_update_auto_warning \
+                   windows_update_efibootmgr_missing windows_update_boot_entry_missing \
+                   windows_update_creating_boot_entry windows_update_boot_entry_created \
+                   windows_update_boot_entry_create_failed windows_update_boot_entry_dry_run \
+                   windows_update_auto_confirm windows_update_found \
+                   windows_update_discovery_failed windows_update_up_to_date \
+                   windows_update_boot_restore_ready windows_update_boot_restore_failed \
+                   windows_update_status_title windows_update_no_status \
                    memlock_raise_failed guest_fips_mask_failed \
                    login1_stub_failed docker_chroot_warning docker_skopeo_missing \
                    docker_image_prompt docker_platform_mismatch docker_layer_apply \
@@ -238,6 +831,7 @@ run_locale_messages() (
 )
 
 run_cli_parsing() (
+    set -e
     # shellcheck source=../lib/core.sh
     source "$PROJECT_ROOT/lib/core.sh"
     t() { printf '%s' "$1"; }
@@ -253,6 +847,44 @@ run_cli_parsing() (
     [[ "$VED_WINDOWS_DRIVE" == "Z" ]]
     [[ "$VED_WINDOWS_WRITE" -eq 0 ]]
 
+    parse_cli --backend powershell --shell update
+    [[ "$VED_SHELL" == "update" ]]
+    parse_cli --backend powershell --shell windows-update
+    [[ "$VED_SHELL" == "update" ]]
+    parse_cli --backend powershell --shell wu
+    [[ "$VED_SHELL" == "update" ]]
+
+    VED_UPDATE_AUTO=0
+    VED_UPDATE_KB=""
+    VED_UPDATE_SHOW_STATUS=0
+    VED_WINDOWS_WRITE_SET=0
+    VED_WINDOWS_WRITE=0
+    parse_cli --backend powershell --auto
+    [[ "$VED_SHELL" == "update" ]]
+    [[ "$VED_UPDATE_AUTO" -eq 1 ]]
+    [[ "$VED_WINDOWS_WRITE" -eq 1 ]]
+
+    VED_UPDATE_AUTO=0
+    VED_UPDATE_SHOW_STATUS=0
+    parse_cli --backend powershell --update-status
+    [[ "$VED_UPDATE_SHOW_STATUS" -eq 1 ]]
+    [[ "$VED_WINDOWS_WRITE" -eq 0 ]]
+
+    VED_UPDATE_SHOW_STATUS=0
+    parse_cli --backend powershell --auto --kb KB5132061,KB5132060
+    [[ "$VED_UPDATE_KB" == "KB5132061,KB5132060" ]]
+
+    VED_UPDATE_AUTO=0
+    VED_UPDATE_KB=""
+    parse_cli --backend powershell --kb KB5132061
+    [[ "$VED_UPDATE_AUTO" -eq 1 ]]
+    [[ "$VED_SHELL" == "update" ]]
+
+    VED_UPDATE_AUTO=0
+    VED_UPDATE_KB=""
+    VED_UPDATE_SHOW_STATUS=0
+    VED_WINDOWS_WRITE_SET=0
+    VED_WINDOWS_WRITE=0
     parse_cli --backend docker --image alpine:latest --docker-storage "$TMPDIR_TEST/oci" \
         --docker-reset --docker-list --arch aarch64
     [[ "$VED_BACKEND" == "docker" ]]
@@ -264,6 +896,7 @@ run_cli_parsing() (
 )
 
 run_session_helpers() (
+    set -e
     # shellcheck source=../lib/core.sh
     source "$PROJECT_ROOT/lib/core.sh"
     # shellcheck source=../lib/session.sh
@@ -444,6 +1077,7 @@ EOF
 )
 
 run_chroot_identity_helpers() (
+    set -e
     # shellcheck source=../lib/core.sh
     source "$PROJECT_ROOT/lib/core.sh"
     # shellcheck source=../lib/session.sh
@@ -518,6 +1152,7 @@ run_chroot_identity_helpers() (
 )
 
 run_chroot_system_bus_config() (
+    set -e
     # shellcheck source=../lib/core.sh
     source "$PROJECT_ROOT/lib/core.sh"
     # shellcheck source=../lib/session.sh
@@ -550,6 +1185,7 @@ run_chroot_system_bus_config() (
 )
 
 run_fips_mask_helper() (
+    set -e
     # shellcheck source=../lib/core.sh
     source "$PROJECT_ROOT/lib/core.sh"
     t() { printf '%s' "$1"; }
@@ -563,6 +1199,7 @@ run_fips_mask_helper() (
 )
 
 run_nspawn_graphical_hardening() (
+    set -e
     # shellcheck source=../lib/core.sh
     source "$PROJECT_ROOT/lib/core.sh"
     # shellcheck source=../lib/session.sh
@@ -603,6 +1240,7 @@ run_nspawn_graphical_hardening() (
 )
 
 run_memlock_helper() (
+    set -e
     # shellcheck source=../lib/core.sh
     source "$PROJECT_ROOT/lib/core.sh"
     t() { printf '%s' "$1"; }
@@ -630,6 +1268,7 @@ run_memlock_helper() (
 )
 
 run_login1_stub_generator() (
+    set -e
     command -v python3 >/dev/null 2>&1 || return 0
 
     local script="$TMPDIR_TEST/ved-login1-stub.py"
@@ -648,6 +1287,7 @@ run_login1_stub_generator() (
 )
 
 run_docker_helpers() (
+    set -e
     # shellcheck source=../lib/core.sh
     source "$PROJECT_ROOT/lib/core.sh"
     # shellcheck source=../lib/docker/registry.sh
@@ -782,6 +1422,7 @@ run_docker_helpers() (
 )
 
 run_docker_backend_flow() (
+    set -e
     # shellcheck source=../lib/core.sh
     source "$PROJECT_ROOT/lib/core.sh"
     # shellcheck source=../lib/docker/registry.sh
@@ -850,6 +1491,7 @@ run_docker_backend_flow() (
 )
 
 run_wayland_socket_export() (
+    set -e
     # shellcheck source=../lib/core.sh
     source "$PROJECT_ROOT/lib/core.sh"
     # shellcheck source=../lib/session.sh
@@ -897,6 +1539,7 @@ run_wayland_socket_export() (
 )
 
 run_locale_key_parity() (
+    set -e
     # shellcheck source=../lib/i18n.sh
     source "$PROJECT_ROOT/lib/i18n.sh"
 
@@ -922,6 +1565,7 @@ run_locale_key_parity() (
 )
 
 run_source_files_exist() (
+    set -e
     local file path missing=0
     while IFS= read -r path; do
         [[ -n "$path" ]] || continue
@@ -997,14 +1641,32 @@ run_ved powershell_invalid_shell 1 'Invalid Windows shell: fish' --backend power
 run_ved powershell_invalid_drive 1 'Invalid Windows drive letter: CC' --backend powershell --windows-drive CC --version
 run_ved powershell_shell_alias 0 'ved 2.1.0' --backend powershell --shell powershell --version
 run_ved powershell_shell_cmd 0 'ved 2.1.0' --backend powershell --shell cmd --version
+run_ved powershell_shell_update 0 'ved 2.1.0' --backend powershell --shell update --version
+run_ved powershell_shell_update_alias 0 'ved 2.1.0' --backend powershell --shell windows-update --version
+run_ved powershell_shell_update_alias_wu 0 'ved 2.1.0' --backend powershell --shell wu --version
+run_ved powershell_auto_option 0 'ved 2.1.0' --backend powershell --auto --version
+run_ved powershell_auto_vm_option 0 'ved 2.1.0' --auto-vm --version
+run_ved powershell_update_vm_alias 0 'ved 2.1.0' --update-vm --version
+run_ved powershell_update_status_option 0 'ved 2.1.0' --backend powershell --update-status --version
+run_ved powershell_invalid_kb 1 'Invalid KB number list' --backend powershell --auto --kb 1234 --version
+run_ved powershell_auto_ro_conflict 1 '--auto needs write access' --backend powershell --auto --windows-ro --version
 run_ved powershell_windows_write 0 'ved 2.1.0' --backend powershell --windows-write --version
 run_ved help_powershell 0 'Mount a Windows partition and open pwsh or cmd' --help
+run_ved help_shell_update 0 'pwsh, cmd or update' --help
+run_ved help_update_auto 0 '--auto' --help
+run_ved help_update_auto_vm 0 '--auto-vm' --help
+run_ved help_update_status 0 '--update-status' --help
 run_ved help_windows_ro 0 '--windows-ro' --help
 run_ved zero_ram 1 'Invalid format. Use, for example: 8G, 16G or 8192M.' --ram 0M --version
 run_ved efi_loader_traversal 1 'Invalid EFI loader path: ../etc/shadow' --efi-loader ../etc/shadow --version
 
 run_case 'run directory isolation' run_directory_isolation
 run_case 'windows backend helpers' run_windows_helpers
+run_case 'windows update auto helpers' run_windows_update_auto_helpers
+run_case 'windows update bash helper' run_windows_update_bash_helper
+run_case 'windows update VM helpers' run_windows_update_vm_helpers
+run_case 'shell auto menu' run_shell_auto_menu
+run_case 'shell auto VM menu' run_shell_auto_vm_menu
 run_case 'docker backend helpers' run_docker_helpers
 run_case 'docker backend flow' run_docker_backend_flow
 run_case 'wayland socket export' run_wayland_socket_export
